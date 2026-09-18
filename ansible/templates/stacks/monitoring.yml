@@ -55,7 +55,6 @@ services:
     ports:
       - "3100:3100"
     volumes:
-      - /opt/PrivateConfig/loki/test-config.yaml:/etc/loki/local-config.yaml
       - /opt/stacks/monitoring/loki-data:/loki
     user: "0"
     deploy:
