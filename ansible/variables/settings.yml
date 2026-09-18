@@ -5,6 +5,8 @@ settings:
       enabled: true
     monitoring:
       enabled: true
+    backups:
+      enabled: true
     minecraft: &default_minecraft
       enabled: true
       whitelist: false
@@ -37,6 +39,8 @@ settings:
   test:
     <<: *default
     environment: Test
+    backups:
+      enabled: false
     minecraft:
       <<: *default_minecraft
       whitelist: true

@@ -1,15 +1,26 @@
 - name: Configure Backups | Create folder
   when:
     - "'swarm_manager' in group_names"
+    - setting.backups.enabled
   file:
     path: /opt/backups
     state: directory
 
 - name: Configure Backups | Copy Script
-  when: "'swarm_manager' in group_names"
+  when:
+    - "'swarm_manager' in group_names"
+    - setting.backups.enabled
   template:
     src: ../../templates/backup-and-restart.sh
     dest: /opt/backup-and-restart.sh
+
+- name: Configure Backups | Remove Script
+  when:
+    - "'swarm_manager' in group_names"
+    - not setting.backups.enabled
+  file:
+    path: /opt/backup-and-restart.sh
+    state: absent
 
 - name: Configure Backups | Setup Cron
   when: "'swarm_manager' in group_names"
@@ -20,3 +31,4 @@
     user: root
     job: /opt/backup-and-restart.sh
     cron_file: /etc/cron.d/minecraft
+    state: "{{ setting.backups.enabled | ternary('present', 'absent') }}"
