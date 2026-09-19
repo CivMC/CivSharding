@@ -5,6 +5,17 @@
     - setting.minecraft.enabled
   command: docker service scale minecraft_paper=1
 
+- name: Start Server | Start Shards
+  when:
+    - "'swarm_manager' in group_names"
+    - setting.minecraft.enabled
+  command: 'docker service scale minecraft_{{shard}}=1'
+  loop:
+    - northeast
+    - southeast
+  loop_control:
+    loop_var: shard
+
 - name: Start Server | Start Zorweth
   when:
     - "'swarm_manager' in group_names"

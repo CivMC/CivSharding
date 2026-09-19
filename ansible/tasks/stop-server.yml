@@ -13,6 +13,21 @@
     - setting.minecraft.enabled
   command: docker service scale minecraft_paper=0
 
+# The other two overworld shards go down with paper: they share its config and its world, and a
+# border with only one side up is a border nobody can cross.
+- name: Stop Server | Stop Shards
+  when:
+    - "'swarm_manager' in group_names"
+    - "'paper' in servers"
+    - setting.minecraft.enabled
+  ignore_errors: true
+  command: 'docker service scale minecraft_{{shard}}=0'
+  loop:
+    - northeast
+    - southeast
+  loop_control:
+    loop_var: shard
+
 - name: Stop Server | Stop Zorweth
   when:
     - "'swarm_manager' in group_names"

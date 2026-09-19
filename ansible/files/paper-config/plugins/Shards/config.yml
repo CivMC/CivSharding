@@ -1,0 +1,132 @@
+# The name this server is registered under in the proxy. It is also the identity this server owns
+# player data under, so it has to match the proxy's server list exactly - a name the proxy does not
+# know owns nothing, and a name belonging to another server owns that server's players.
+server-name: ${CIV_SHARD_NAME}
+
+# Shown to a player whose data could not be claimed or restored. They are refused rather than let in
+# on whatever this server happens to have on disk, because that would be someone else's stale copy.
+failure-message: "Unable to load your player data. Please reconnect and try again."
+
+# How often a player who is still playing is written back, in seconds. Their data is otherwise only
+# stored when they leave or cross a border, so a server that is killed rather than stopped cleanly
+# loses everything since they arrived. Set to 0 to turn it off.
+save-interval-seconds: 60
+
+# Shown to a player who crosses in from another shard. Their client has to leave play, rebuild its
+# registries and load terrain again - the same sequence as logging in, and it looks like it - so this
+# is what marks the moment as having walked somewhere rather than having been disconnected. It cannot
+# shorten the pause, which is Minecraft's own and about 370ms of it is unavoidable. MiniMessage
+# formatting. Leave both blank to show nothing.
+arrival:
+  title: ""
+  subtitle: ""
+
+# How often this server asks the proxy what the sky should look like, in seconds.
+#
+# Every shard generates the same world from the same seed, so the ground either side of a border is
+# identical - which makes the sky the one thing that gives away that a crossing changed servers.
+# Without this, each shard runs its own clock and its own weather cycle, and walking over a line can
+# take a player from noon into a thunderstorm over continuous terrain.
+#
+# Time is corrected rather than driven: the daylight cycle keeps running, and this only steps in when
+# the local clock has drifted more than a couple of seconds, so the sky still moves if the proxy goes
+# quiet. Weather is the proxy's outright - this server's own weather cycle is turned off - because
+# there is no cycle to derive a shared storm from. Sleeping through the night is forwarded to the
+# proxy, so a bed still works and moves everybody's morning together, not just this shard's.
+#
+# Set to 0 to leave this server's sky to itself.
+sky-sync-seconds: 5
+
+# Whether this server stops spawning, and stops showing, entities on ground it does not own.
+#
+# The world does not stop at a border: this server loads and ticks the chunks past its edge and fills
+# them with its own mobs and items. None of it is real. The shard that owns that ground has its own,
+# different contents there and cannot see any of this - so looking across a border shows a herd of
+# cows standing where a neighbour's building is, visible to nobody else.
+#
+# Nothing is ever removed, only hidden, because an entity out there is still a real one of this
+# server's and deleting it would be destroying somebody's dropped items or their minecart.
+#
+# Note this changes what can be farmed near a border: mobs that used to spawn past it were never
+# legitimately this shard's, so anything relying on both shards spawning in the same field loses half
+# its rate. Set to false to go back to the old behaviour while judging that.
+hide-unowned-entities: true
+
+# Whether this server shows what the neighbouring shard really has on the ground past the border.
+#
+# Every shard's world starts as a copy of the same map, so unmodified ground matches exactly - which
+# is why the terrain is continuous across a border. What does not match is everything built since:
+# those blocks live on the shard that owns them and are absent from this server's copy, and the gap
+# grows for as long as the map lives. Without this, standing at a border a year in means looking at
+# empty hills where there is a city.
+#
+# The neighbour is asked for the chunk as it really is, and the difference against this server's own
+# copy is sent to players as block changes. Nothing is written: the mirrored blocks never enter this
+# server's world, so no plugin can find them and nothing out there can be reinforced, counted, broken
+# or picked up. The border stays exactly as impermeable as it was - this only changes what is drawn.
+mirror-chunks: true
+
+# Whether what the neighbouring shards have said is kept across a restart.
+#
+# Without it, everything a neighbour has told this server lives only in memory. A restart throws it
+# all away and every chunk along every border is read again from nothing - and, the part that matters,
+# a neighbour that is down leaves a hole in the map: with nothing to draw, a player at the border sees
+# this server's own untouched copy, which is empty hills where there is a city. The one time the
+# mirror is most needed is the one time it has nothing.
+#
+# What is written is the difference from this server's own copy, not the neighbour's chunk, so it is a
+# fraction of the size and goes on screen without reading or comparing anything. It is kept in
+# plugins/Shards/mirror.json.gz, rewritten every five minutes and again when the server stops.
+#
+# Nothing loaded is trusted. Every restored chunk is read from its owner again the first time anybody
+# looks at it, so it is a head start and not a catch-up log - it is only ever as out of date as the
+# first second somebody stands there, and only stays so while its owner cannot be reached at all.
+#
+# A saved difference only means anything against a copy of that ground which has not moved underneath
+# it, which holds because every block change past the border is already refused.
+save-mirror: true
+
+# How deep a strip of each neighbour's ground this server brings its own copy of up to date at
+# startup, in chunks. Zero switches it off.
+#
+# Every shard starts as a copy of the same world and from then on only ever changes its own ground,
+# so this server's copy of its neighbours' land is that land as it was on the day of the split. The
+# mirror draws over that for the client and writes none of it, which is right for a picture and
+# leaves the server itself still simulating against the old blocks: a player walks into walls only
+# this server believes in, and a minecart carries its rider into them and suffocates them, with a
+# clear view of open ground the whole way.
+#
+# This is not the mirror becoming real. The neighbour's blocks have been in this world since the day
+# it was copied - what is out of date is which day - so this refreshes the seed rather than making a
+# picture solid. Terrain only: a chunk read carries block states, so no chest's contents and no
+# sign's words are written, and those stay drawn and unreal.
+#
+# A thin strip on purpose. What matters is where a player can reach, which is the first block or two
+# past a seam; the rest of what they can see is the mirror's job. Two chunks around a shard is a few
+# hundred columns, where the visible radius would be thousands.
+#
+# Opportunistic: a neighbour that is still starting up is skipped rather than waited for, and asked
+# again every minute until it answers. Ground owned by nobody is left alone - this server's copy of
+# it is already the best there is.
+border-band-chunks: 2
+
+# What the border between shards is drawn with, where a player can see one.
+#
+#   particles  coloured dust, repainted twice a second. Nothing exists in the world between passes,
+#              so there is nothing to clean up and nothing for another plugin to trip over. A client
+#              set to minimal particles is shown no border at all, which is the catch.
+#   glass      a pane of stained glass per face, blue where a crossing will work and red where it
+#              will not. These are display entities, so they render whatever the particle setting
+#              says - but they are real entities in the world, and other plugins can see them.
+#
+# Neither is guaranteed to be drawn: entity render distance is a client setting too. The only thing
+# that always renders is blocks actually placed in the world, which is not something this will ever do.
+border-style: glass
+
+# This server holds no database credentials. It reaches its player data by asking the proxy over
+# RabbitMQ, and the proxy is the only thing that reads or writes the store.
+rabbitmq:
+  user: ${CIV_RABBITMQ_USERNAME}
+  password: ${CIV_RABBITMQ_PASSWORD}
+  host: ${CIV_RABBITMQ_HOST}
+  port: 5672

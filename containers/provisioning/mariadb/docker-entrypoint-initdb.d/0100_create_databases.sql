@@ -68,3 +68,8 @@ GRANT ALL PRIVILEGES ON `zorweth_heliodor`.* TO 'mariadb'@'%';
 
 CREATE DATABASE zorweth;
 GRANT ALL PRIVILEGES ON `zorweth`.* TO 'mariadb'@'%';
+
+-- Player data for the sharded overworld. The proxy is the only thing that reads or writes it;
+-- the shards hold no credentials and ask over RabbitMQ.
+CREATE DATABASE shards;
+GRANT ALL PRIVILEGES ON `shards`.* TO 'mariadb'@'%';

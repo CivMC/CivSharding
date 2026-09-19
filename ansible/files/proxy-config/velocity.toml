@@ -73,6 +73,8 @@ enable-player-address-logging = true
 # Configure your servers here. Each key represents the server's name, and the value
 # represents the IP address of the server to connect to.
 main = "paper:25565"
+northeast = "northeast:25565"
+southeast = "southeast:25565"
 pvp = "pvp:25565"
 zorweth = "zorweth:25565"
 

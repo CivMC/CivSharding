@@ -87,6 +87,8 @@ services:
 
             CIV_SECUREBOOT_ENABLE: 'true'
             CIV_SERVER_NAME: prod-server
+            # The name this shard owns ground and player data under; must match the proxy's server list
+            CIV_SHARD_NAME: main
 {% if setting.minecraft.whitelist %}
             ENABLE_WHITELIST: 'true'
             CIV_WHITELIST: 'true'
@@ -131,6 +133,158 @@ services:
             resources:
                 limits:
                     memory: '{{setting.minecraft.resources.memory_limit}}'
+
+    # The two shards that share the overworld with `paper` above. Everything but the name and the
+    # data directory is deliberately identical: same image, same generator, same seeds, the same
+    # config tree and the same plugins, because the ground either side of a border has to be the
+    # same ground. Their data directories are copies of paper-data, not fresh worlds.
+    northeast:
+        image: itzg/minecraft-server:stable-java25
+        restart: unless-stopped
+        tty: true
+        stdin_open: true
+        stop_grace_period: 60m
+        networks:
+            - minecraft_default
+        environment:
+            TYPE: 'paper'
+            VERSION: '1.21.11'
+            EULA: 'TRUE'
+            PAPER_DOWNLOAD_URL: 'https://api.leafmc.one/v2/projects/leaf/versions/1.21.11/builds/166/downloads/leaf-1.21.11-166.jar'
+
+            REMOVE_OLD_MODS: 'TRUE'
+            COPY_CONFIG_DEST: '/data'
+            SYNC_SKIP_NEWER_IN_DESTINATION: 'false'
+            REPLACE_ENV_DURING_SYNC: 'TRUE'
+            REPLACE_ENV_VARIABLE_PREFIX: 'CIV'
+
+            INIT_MEMORY: '{{setting.minecraft.resources.shard_memory}}'
+            MAX_MEMORY: '{{setting.minecraft.resources.shard_memory}}'
+            USE_MEOWICE_FLAGS: 'TRUE'
+            STOP_DURATION: 3600
+
+            CIV_SECUREBOOT_ENABLE: 'true'
+            CIV_SERVER_NAME: prod-server
+            # The name this shard owns ground and player data under; must match the proxy's server list
+            CIV_SHARD_NAME: northeast
+{% if setting.minecraft.whitelist %}
+            ENABLE_WHITELIST: 'true'
+            CIV_WHITELIST: 'true'
+{% else %}
+            ENABLE_WHITELIST: 'false'
+            CIV_WHITELIST: 'false'
+{% endif %}
+
+            CIV_WORLD_GENERATOR: Terra:CIVMC
+            CIV_WORDBANK_SEED: '{{secret.minecraft.wordbank_seed}}'
+            CIV_HIDDENORE_DENSITY_SEED: '{{ secret.minecraft.zorweth_hiddenore_density_seed }}'
+            CIV_HIDDENORE_HEIGHT_SEED: '{{ secret.minecraft.zorweth_hiddenore_height_seed }}'
+
+            CIV_MYSQL_HOST: minecraft_mariadb
+            CIV_MYSQL_USERNAME: '{{secret.minecraft.mysql.username}}'
+            CIV_MYSQL_PASSWORD: '{{secret.minecraft.mysql.password}}'
+
+            CIV_POSTGRES_HOST: minecraft_postgres
+            CIV_POSTGRES_USERNAME: '{{secret.minecraft.postgres.username}}'
+            CIV_POSTGRES_PASSWORD: '{{secret.minecraft.postgres.password}}'
+
+            CIV_DATABASE_PREFIX: ''
+
+            CIV_RABBITMQ_HOST: minecraft_rabbitmq
+            CIV_RABBITMQ_USERNAME: rabbitmq
+            CIV_RABBITMQ_PASSWORD: '{{secret.minecraft.rabbitmq.password}}'
+
+            CIV_WATCHDOG_TIMEOUT_TIME: 60
+            CIV_FORWARDING_SECRET: '{{secret.minecraft.forwarding_secret}}'
+
+            JVM_OPTS: '-agentpath:./libti.so'
+        volumes:
+            # Persistence
+            - /opt/stacks/minecraft/northeast-data:/data
+            # Config & Plugins
+            - /opt/stacks/minecraft/paper-config:/config
+            - /opt/stacks/minecraft/paper-plugins:/plugins
+
+        deploy:
+            placement:
+                constraints: [node.role == manager]
+            resources:
+                limits:
+                    memory: '{{setting.minecraft.resources.shard_memory_limit}}'
+
+    southeast:
+        image: itzg/minecraft-server:stable-java25
+        restart: unless-stopped
+        tty: true
+        stdin_open: true
+        stop_grace_period: 60m
+        networks:
+            - minecraft_default
+        environment:
+            TYPE: 'paper'
+            VERSION: '1.21.11'
+            EULA: 'TRUE'
+            PAPER_DOWNLOAD_URL: 'https://api.leafmc.one/v2/projects/leaf/versions/1.21.11/builds/166/downloads/leaf-1.21.11-166.jar'
+
+            REMOVE_OLD_MODS: 'TRUE'
+            COPY_CONFIG_DEST: '/data'
+            SYNC_SKIP_NEWER_IN_DESTINATION: 'false'
+            REPLACE_ENV_DURING_SYNC: 'TRUE'
+            REPLACE_ENV_VARIABLE_PREFIX: 'CIV'
+
+            INIT_MEMORY: '{{setting.minecraft.resources.shard_memory}}'
+            MAX_MEMORY: '{{setting.minecraft.resources.shard_memory}}'
+            USE_MEOWICE_FLAGS: 'TRUE'
+            STOP_DURATION: 3600
+
+            CIV_SECUREBOOT_ENABLE: 'true'
+            CIV_SERVER_NAME: prod-server
+            # The name this shard owns ground and player data under; must match the proxy's server list
+            CIV_SHARD_NAME: southeast
+{% if setting.minecraft.whitelist %}
+            ENABLE_WHITELIST: 'true'
+            CIV_WHITELIST: 'true'
+{% else %}
+            ENABLE_WHITELIST: 'false'
+            CIV_WHITELIST: 'false'
+{% endif %}
+
+            CIV_WORLD_GENERATOR: Terra:CIVMC
+            CIV_WORDBANK_SEED: '{{secret.minecraft.wordbank_seed}}'
+            CIV_HIDDENORE_DENSITY_SEED: '{{ secret.minecraft.zorweth_hiddenore_density_seed }}'
+            CIV_HIDDENORE_HEIGHT_SEED: '{{ secret.minecraft.zorweth_hiddenore_height_seed }}'
+
+            CIV_MYSQL_HOST: minecraft_mariadb
+            CIV_MYSQL_USERNAME: '{{secret.minecraft.mysql.username}}'
+            CIV_MYSQL_PASSWORD: '{{secret.minecraft.mysql.password}}'
+
+            CIV_POSTGRES_HOST: minecraft_postgres
+            CIV_POSTGRES_USERNAME: '{{secret.minecraft.postgres.username}}'
+            CIV_POSTGRES_PASSWORD: '{{secret.minecraft.postgres.password}}'
+
+            CIV_DATABASE_PREFIX: ''
+
+            CIV_RABBITMQ_HOST: minecraft_rabbitmq
+            CIV_RABBITMQ_USERNAME: rabbitmq
+            CIV_RABBITMQ_PASSWORD: '{{secret.minecraft.rabbitmq.password}}'
+
+            CIV_WATCHDOG_TIMEOUT_TIME: 60
+            CIV_FORWARDING_SECRET: '{{secret.minecraft.forwarding_secret}}'
+
+            JVM_OPTS: '-agentpath:./libti.so'
+        volumes:
+            # Persistence
+            - /opt/stacks/minecraft/southeast-data:/data
+            # Config & Plugins
+            - /opt/stacks/minecraft/paper-config:/config
+            - /opt/stacks/minecraft/paper-plugins:/plugins
+
+        deploy:
+            placement:
+                constraints: [node.role == manager]
+            resources:
+                limits:
+                    memory: '{{setting.minecraft.resources.shard_memory_limit}}'
 
     zorweth:
         image: itzg/minecraft-server:stable-java25
