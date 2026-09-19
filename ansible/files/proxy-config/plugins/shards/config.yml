@@ -60,7 +60,7 @@ shards:
   southeast:
     - vertices: [{x: 0, z: 0}, {x: 10000, z: 0}, {x: 10000, z: 10000}, {x: 0, z: 10000}]
 
-holding-server: "pvp"
+holding-server: "main"
 
 # Whether this proxy answers /list for the whole network. A shard's own /list knows only the people
 # on it, so a network spread evenly across shards reads as several half-empty servers. Registering
