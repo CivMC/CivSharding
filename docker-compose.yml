@@ -273,6 +273,8 @@ services:
 
       CIV_SECUREBOOT_ENABLE: 'false'
       CIV_SERVER_NAME: local
+      # The name this shard owns ground and player data under; must match the proxy's server list
+      CIV_SHARD_NAME: zorweth
 
       CIV_WORDBANK_SEED: wordbank
 
