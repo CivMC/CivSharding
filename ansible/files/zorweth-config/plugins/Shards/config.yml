@@ -1,0 +1,54 @@
+# Zorweth's copy. It is a shard, but the only kind that has no neighbour: another map at
+# z = -20000, reached by rocket, with nothing to walk to. Everything here that exists to make a
+# seam work is therefore turned off, and what is left is the one thing being a shard buys it -
+# its players' data is the network's, claimed on arrival and written back when they leave, so an
+# inventory is the same inventory here as it is on the overworld.
+
+# The name this server is registered under in the proxy. It is also the identity this server owns
+# player data under, so it has to match the proxy's server list exactly - a name the proxy does not
+# know owns nothing, and a name belonging to another server owns that server's players.
+server-name: ${CIV_SHARD_NAME}
+
+# Shown to a player whose data could not be claimed or restored. They are refused rather than let in
+# on whatever this server happens to have on disk, because that would be someone else's stale copy.
+failure-message: "Unable to load your player data. Please reconnect and try again."
+
+# How often a player who is still playing is written back, in seconds. Their data is otherwise only
+# stored when they leave, so a server that is killed rather than stopped cleanly loses everything
+# since they arrived. Set to 0 to turn it off.
+save-interval-seconds: 60
+
+# Nothing is ever walked into here, so there is no crossing to announce.
+arrival:
+  title: ""
+  subtitle: ""
+
+# Zorweth keeps its own sky. The overworld shards share one because the ground either side of their
+# borders is continuous and a crossing must not change the weather; Zorweth has no border with
+# anybody and is not meant to look like the overworld, so taking main's storms would be importing
+# weather from a different planet.
+sky-sync-seconds: 0
+
+# Its own areas cover the whole of its map with a wide margin, so there is no unowned ground here
+# for this to hide anything on. Left on because it costs nothing and is the correct rule.
+hide-unowned-entities: true
+
+# All three below exist to draw and to reconcile a neighbour's ground across a seam. Zorweth has no
+# seam - the nearest other shard is ten thousand blocks of nothing away - so each would be pure cost
+# for a picture of land that does not exist.
+mirror-chunks: false
+save-mirror: false
+border-band-chunks: 0
+
+# Never drawn, because there is no face of this shard's outline within sight of anywhere a player
+# can stand. Kept at the network's setting so that the day Zorweth does get a neighbour, this is
+# not the thing that was forgotten.
+border-style: glass
+
+# This server holds no database credentials. It reaches its player data by asking the proxy over
+# RabbitMQ, and the proxy is the only thing that reads or writes the store.
+rabbitmq:
+  user: ${CIV_RABBITMQ_USERNAME}
+  password: ${CIV_RABBITMQ_PASSWORD}
+  host: ${CIV_RABBITMQ_HOST}
+  port: 5672

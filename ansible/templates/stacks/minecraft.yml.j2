@@ -313,6 +313,10 @@ services:
 
             CIV_SECUREBOOT_ENABLE: 'true'
             CIV_SERVER_NAME: prod-server
+            # The name this shard owns ground and player data under; must match the proxy's server
+            # list. Zorweth is a shard with no neighbour - it owns its own map at z = -20000 and has
+            # no border to anywhere - so what this buys it is the network's shared player data
+            CIV_SHARD_NAME: zorweth
 {% if setting.minecraft.zorweth_whitelist %}
             ENABLE_WHITELIST: 'true'
             CIV_WHITELIST: 'true'

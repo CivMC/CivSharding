@@ -52,6 +52,19 @@ rabbitmq:
 # southeast's - so a player can stand on a triple point and cross either way from it. That is
 # the case worth testing: a corner where three outlines, three mirrors and two crossings all
 # have to agree about the same block.
+#
+# Zorweth is the fourth shard and the one that is not part of that picture. It is another map
+# entirely, reached by rocket rather than on foot, and it sits at z = -20000 - a circle of radius
+# 6850 around (0, -20000), which its own plugin and its own world border both say. That is what
+# lets it be a shard at all: shards divide coordinates rather than worlds, so two maps can only
+# share this config if they do not share ground, and these two never have. The box below is that
+# circle with about a thousand blocks of margin, and the nearest main-map ground is at z = -10000,
+# so nothing of one is inside the other.
+#
+# It owns no border with anybody. There is no ground between z = -12000 and z = -10000 for anyone
+# to walk over, so Zorweth has no seam, no mirror and no crossing - being listed here does one
+# thing for it, which is to put it inside the network's shared player data. Leaving it out is what
+# made a player's inventory on Zorweth a separate thing from their inventory on the overworld.
 shards:
   main:
     - vertices: [{x: -10000, z: -10000}, {x: 0, z: -10000}, {x: 0, z: 10000}, {x: -10000, z: 10000}]
@@ -59,8 +72,10 @@ shards:
     - vertices: [{x: 0, z: -10000}, {x: 10000, z: -10000}, {x: 10000, z: 0}, {x: 0, z: 0}]
   southeast:
     - vertices: [{x: 0, z: 0}, {x: 10000, z: 0}, {x: 10000, z: 10000}, {x: 0, z: 10000}]
+  zorweth:
+    - vertices: [{x: -8000, z: -28000}, {x: 8000, z: -28000}, {x: 8000, z: -12000}, {x: -8000, z: -12000}]
 
-holding-server: "main"
+holding-server: "pvp"
 
 # Whether this proxy answers /list for the whole network. A shard's own /list knows only the people
 # on it, so a network spread evenly across shards reads as several half-empty servers. Registering
