@@ -46,6 +46,37 @@ public final class ShardsRabbitMqTopology {
      */
     public static final boolean REQUEST_QUEUE_DURABLE = true;
 
+    public static final String MIRROR_QUEUE_PREFIX = "shards.mirror.";
+    // A chunk request whose asker has given up is work nobody will look at, and the mirror asks about
+    // whatever a player has just walked towards - by the time a late one is answered they are
+    // somewhere else. Longer than the probe's, because a chunk costs real work to read and is worth
+    // waiting a little for
+    public static final int MIRROR_REQUEST_TTL_MILLIS = 30_000;
+
+    /**
+     * Where a shard is asked about its own chunks.
+     *
+     * <p>Addressed to a shard rather than to the proxy, which is the first message in this project
+     * that is. The proxy has the shard map but no world, so it cannot answer what is in a chunk - it
+     * only says whose chunk it is.</p>
+     */
+    public static String mirrorQueue(final String serverName) {
+        return MIRROR_QUEUE_PREFIX + serverName;
+    }
+
+    /**
+     * Where a shard announces blocks that have just changed near its border.
+     *
+     * <p>A fanout, so a shard does not have to know which neighbour is looking at which of its
+     * chunks - which would mean tracking that and keeping it up to date as players walk. Every shard
+     * gets every announcement and drops the ones about chunks it has not fetched, which it can answer
+     * from its own cache without asking anybody.</p>
+     */
+    public static final String MIRROR_UPDATE_EXCHANGE = "shards.mirror.updates";
+    // Worthless within seconds: a receiver that has been away is going to re-read the chunk anyway,
+    // and applying a minute-old change on top of a fresh read would put back what was taken away
+    public static final int MIRROR_UPDATE_TTL_MILLIS = 15_000;
+
     public static final String REPLY_QUEUE_PREFIX = "shards.replies.";
 
     /**

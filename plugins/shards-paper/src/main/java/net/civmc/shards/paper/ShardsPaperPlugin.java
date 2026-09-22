@@ -17,9 +17,17 @@ import net.civmc.shards.paper.border.ShardBorderListener;
 import net.civmc.shards.paper.border.ShardRespawnListener;
 import net.civmc.shards.paper.border.TransferService;
 import net.civmc.shards.paper.config.ShardsPaperConfig;
+import net.civmc.shards.paper.mirror.ChunkStateProvider;
+import net.civmc.shards.paper.mirror.MirrorMetrics;
+import net.civmc.shards.paper.mirror.MirrorRepairListener;
+import net.civmc.shards.paper.mirror.MirrorUpdatePublisher;
+import net.civmc.shards.paper.mirror.MirrorView;
+import net.civmc.shards.paper.mirror.UnownedEntityView;
+import net.civmc.shards.paper.mirror.UnownedGroundListener;
 import net.civmc.shards.paper.playerdata.OwnedPlayers;
 import net.civmc.shards.paper.playerdata.PlayerDataListener;
 import net.civmc.shards.paper.rabbitmq.ShardsClient;
+import net.civmc.shards.paper.rabbitmq.ShardsServer;
 import net.civmc.shards.paper.sky.SkyListener;
 import net.civmc.shards.paper.sky.SkySync;
 import net.civmc.shards.paper.snapshot.SnapshotVerifyCommand;
@@ -36,6 +44,11 @@ public final class ShardsPaperPlugin extends JavaPlugin {
     // Half a second: often enough that the particles look continuous and that a neighbour going down
     // is noticed while the player is still stood at the border, rare enough to be nothing on a tick
     private static final long BORDER_VIEW_TICKS = 10L;
+    private static final long UNOWNED_SWEEP_TICKS = 20L * 5L;
+    // Once a second. A chunk that is already mirrored costs a lookup here, so this is about how long
+    // after walking towards a border the far side fills in, not about how often work is done
+    private static final long MIRROR_TICKS = 20L;
+    private static final long MIRROR_REPORT_TICKS = 20L * 30L;
     private static final long STARTUP_RETRY_MIN_TICKS = 20L * 5L;
     private static final long STARTUP_RETRY_MAX_TICKS = 20L * 60L;
 
@@ -44,6 +57,7 @@ public final class ShardsPaperPlugin extends JavaPlugin {
     private ShardsClient client;
     private OwnedPlayers owned;
     private TransferService transfers;
+    private ShardsServer mirrorServer;
     private final ShardBorder border = new ShardBorder();
     // Read from the login thread, written from whichever thread the startup answer arrives on
     private volatile boolean startupComplete;
@@ -84,6 +98,8 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             new ShardRespawnListener(this, this.border, this.transfers, getLogger()), this);
         getCommand("shardsnapshot").setExecutor(new SnapshotVerifyCommand());
         startSkySync();
+        startUnownedEntityView();
+        startMirror(outlook);
         startPeriodicSave();
         startBorderView(this.view);
     }
@@ -104,6 +120,9 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             // behind is invisible litter that nothing else will ever clean up
             this.view.close();
         }
+        if (this.mirrorServer != null) {
+            this.mirrorServer.close();
+        }
         if (this.client != null) {
             this.client.close();
         }
@@ -117,6 +136,81 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             case PARTICLES -> new ParticleBorderRenderer();
             case GLASS -> new GlassBorderRenderer(this);
         };
+    }
+
+    /**
+     * Stops this server showing, and stops it creating, entities on ground it does not own.
+     *
+     * <p>The world does not stop at a border, so this server populates the chunks past its edge with
+     * a copy of nothing anybody else can see - a herd of cows standing where the neighbour has a
+     * building. The first piece of showing what is really over there is to stop drawing what is
+     * not.</p>
+     */
+    private void startUnownedEntityView() {
+        if (!this.config.hideUnownedEntities()) {
+            getLogger().warning("Not hiding entities on unowned ground: players will see this server's own "
+                + "mobs and items standing past its border, which no other shard can see");
+            return;
+        }
+        final UnownedEntityView view = new UnownedEntityView(this, this.border);
+        getServer().getPluginManager().registerEvents(view, this);
+        getServer().getPluginManager().registerEvents(new UnownedGroundListener(this.border), this);
+        // Slow, because it only exists to catch entities that wandered out after they were already
+        // being shown. Everything arriving is caught by the tracking event, which costs nothing
+        getServer().getScheduler().runTaskTimer(this, () -> {
+            for (final Player player : Bukkit.getOnlinePlayers()) {
+                view.sweep(player);
+            }
+        }, UNOWNED_SWEEP_TICKS, UNOWNED_SWEEP_TICKS);
+    }
+
+    /**
+     * Shows what the neighbouring shards really have on the ground past the border.
+     *
+     * <p>Every shard's world begins as a copy of the same map, so unmodified ground already matches -
+     * but everything built on a neighbour since is missing from this server's copy, and the gap grows
+     * for as long as the map lives. The neighbour is asked for the chunk as it really is and the
+     * difference is sent to clients; nothing is ever written into this server's world, so none of it
+     * can be reinforced, counted, broken or picked up.</p>
+     */
+    private void startMirror(final BorderOutlook outlook) {
+        if (!this.config.mirrorChunks()) {
+            getLogger().warning("Not mirroring neighbouring shards: the ground past a border will be shown "
+                + "as this server's own untouched copy of it, which is the map as it was when the shards "
+                + "were split");
+            return;
+        }
+        final MirrorMetrics metrics = new MirrorMetrics();
+        // As far as the client renders, which is what has to look right. The neighbour's own view
+        // distance does not come into it - it is this server's players who are looking
+        final MirrorView mirror = new MirrorView(this, this.border, outlook, this.client,
+            this.config.serverName(), getLogger(), getServer().getViewDistance(), metrics);
+        this.mirrorServer = new ShardsServer(this.config.connectionFactory(), this.config.serverName(), this,
+            getLogger(), new ChunkStateProvider(this.border), metrics,
+            // Announcements arrive on a broker thread and this reads the world and sends to players
+            update -> getServer().getScheduler().runTask(this, () -> mirror.applyUpdate(update)));
+        this.mirrorServer.start();
+        getServer().getPluginManager().registerEvents(mirror, this);
+        // A refused placement makes the client correct itself to what is really there, which for
+        // another shard's ground is this server's own copy - so the mirror has to be drawn again
+        getServer().getPluginManager().registerEvents(new MirrorRepairListener(this, mirror), this);
+
+        // Tells the other shards what has just changed here, so none of them has to re-read a chunk to
+        // find out. Flushed once a tick: a block changed several times in one tick is sent once
+        final MirrorUpdatePublisher publisher = new MirrorUpdatePublisher(this.border, this.client,
+            this.config.serverName(), getLogger());
+        getServer().getPluginManager().registerEvents(publisher, this);
+        getServer().getScheduler().runTaskTimer(this, publisher::flush, 1L, 1L);
+        getServer().getScheduler().runTaskTimer(this, () -> {
+            for (final Player player : Bukkit.getOnlinePlayers()) {
+                mirror.update(player);
+            }
+        }, MIRROR_TICKS, MIRROR_TICKS);
+        // What the mirror costs is not visible from anywhere else, and the two numbers it reports -
+        // how long a chunk takes to read, and how many blocks really differ - are what decide whether
+        // this survives a busy border
+        getServer().getScheduler().runTaskTimerAsynchronously(this, () -> metrics.report(getLogger()),
+            MIRROR_REPORT_TICKS, MIRROR_REPORT_TICKS);
     }
 
     /**
