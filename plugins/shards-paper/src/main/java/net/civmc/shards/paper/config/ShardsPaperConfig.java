@@ -21,19 +21,25 @@ import org.bukkit.configuration.file.FileConfiguration;
  * @param hideUnownedEntities whether this server stops spawning and stops showing entities on
  *     ground it does not own, which it otherwise populates with a wrong copy the owning shard cannot
  *     see
+ * @param mirrorMovingEntities whether this server shows the minecarts, animals and dropped items a
+ *     neighbouring shard has, and tells the others about its own. Unlike the rest of the mirror this
+ *     is a cost paid every tick whether or not anybody is looking across a border, which is why it
+ *     has a switch of its own
  * @param mirrorChunks whether this server shows what the neighbouring shard really has on the
  *     ground past the border, instead of its own untouched copy of it
  * @param saveMirror whether what the neighbours have said is kept across a restart. Without it a
  *     restart reads every border chunk again from nothing, and a neighbour that is down shows as this
  *     server's own untouched copy rather than the last thing it said
  * @param borderStyle what the border is drawn with
- * @param borderBandChunks how deep a strip of each neighbour's ground this server brings its own copy
- *     of up to date at startup, in chunks. Zero switches it off and leaves that ground as it was on
- *     the day this shard was copied from the others
+ * @param borderBandChunks how deep a strip of each neighbour's ground this server keeps its own copy
+ *     of up to date, in chunks - read from its owners at startup and kept current from the
+ *     announcements afterwards. Zero switches both off and leaves that ground as it was on the day
+ *     this shard was copied from the others
  */
 public record ShardsPaperConfig(String serverName, String failureMessage, int saveIntervalSeconds,
                                 String arrivalTitle, String arrivalSubtitle, int skySyncSeconds,
-                                boolean hideUnownedEntities, boolean mirrorChunks, boolean saveMirror,
+                                boolean hideUnownedEntities, boolean mirrorChunks,
+                                boolean mirrorMovingEntities, boolean saveMirror,
                                 BorderStyle borderStyle, int borderBandChunks,
                                 String user, String password, String host, int port) {
 
@@ -89,6 +95,7 @@ public record ShardsPaperConfig(String serverName, String failureMessage, int sa
             configuration.getInt("sky-sync-seconds", 5),
             configuration.getBoolean("hide-unowned-entities", true),
             configuration.getBoolean("mirror-chunks", true),
+            configuration.getBoolean("mirror-moving-entities", true),
             configuration.getBoolean("save-mirror", true),
             borderStyle(configuration.getString("border-style", "particles")),
             configuration.getInt("border-band-chunks", 2),

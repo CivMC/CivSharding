@@ -35,6 +35,15 @@ public record PlayerClaimResponse(UUID requestId, ClaimStatus status, String pay
             System.currentTimeMillis());
     }
 
+    /**
+     * The asking server is not in the shard map, so it was given nothing and holds nothing. See
+     * {@link ClaimStatus#NOT_A_SHARD}.
+     */
+    public static PlayerClaimResponse notAShard(final UUID requestId) {
+        return new PlayerClaimResponse(requestId, ClaimStatus.NOT_A_SHARD, null, null, null, false, "",
+            System.currentTimeMillis());
+    }
+
     public static PlayerClaimResponse heldByOther(final UUID requestId, final UUID heldBy) {
         return new PlayerClaimResponse(requestId, ClaimStatus.HELD_BY_OTHER, null, null, heldBy, false, "",
             System.currentTimeMillis());

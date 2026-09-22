@@ -26,6 +26,7 @@ import java.util.logging.Logger;
 import net.civmc.shards.api.ChunkStateRequest;
 import net.civmc.shards.api.ChunkStateResponse;
 import net.civmc.shards.api.ChunkUpdateMessage;
+import net.civmc.shards.api.MobPositionMessage;
 import net.civmc.shards.api.PlayerPositionMessage;
 import net.civmc.shards.api.ShardsRabbitMqTopology;
 import net.civmc.shards.api.mirror.ChunkStateCodec;
@@ -65,6 +66,7 @@ public final class ShardsServer implements AutoCloseable {
     private final MirrorMetrics metrics;
     private final Consumer<ChunkUpdateMessage> updates;
     private final Consumer<PlayerPositionMessage> positions;
+    private final Consumer<MobPositionMessage> mobs;
     private volatile boolean closed;
     private Connection connection;
     // One per consumer. The driver dispatches a channel's deliveries on a single thread, in order, so
@@ -79,7 +81,8 @@ public final class ShardsServer implements AutoCloseable {
     public ShardsServer(final ConnectionFactory connectionFactory, final String serverName,
                         final JavaPlugin plugin, final Logger logger, final ChunkStateProvider chunks,
                         final MirrorMetrics metrics, final Consumer<ChunkUpdateMessage> updates,
-                        final Consumer<PlayerPositionMessage> positions) {
+                        final Consumer<PlayerPositionMessage> positions,
+                        final Consumer<MobPositionMessage> mobs) {
         this.connectionFactory = connectionFactory;
         this.serverName = serverName;
         this.plugin = plugin;
@@ -88,6 +91,7 @@ public final class ShardsServer implements AutoCloseable {
         this.metrics = metrics;
         this.updates = updates;
         this.positions = positions;
+        this.mobs = mobs;
     }
 
     public boolean start() {
@@ -118,6 +122,8 @@ public final class ShardsServer implements AutoCloseable {
                 ChunkUpdateMessage::serverName, this.updates);
             consumeAnnouncements(ShardsRabbitMqTopology.MIRROR_PLAYER_EXCHANGE, PlayerPositionMessage.class,
                 PlayerPositionMessage::serverName, this.positions);
+            consumeAnnouncements(ShardsRabbitMqTopology.MIRROR_MOB_EXCHANGE, MobPositionMessage.class,
+                MobPositionMessage::serverName, this.mobs);
             this.logger.info("Answering chunk requests from other shards on "
                 + ShardsRabbitMqTopology.mirrorQueue(this.serverName));
             return true;

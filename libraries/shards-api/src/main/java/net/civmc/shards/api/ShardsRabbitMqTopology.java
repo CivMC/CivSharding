@@ -89,6 +89,18 @@ public final class ShardsRabbitMqTopology {
     // replaced - and applying one that is a second old would drag somebody backwards
     public static final int MIRROR_PLAYER_TTL_MILLIS = 100;
 
+    /**
+     * Where a shard announces where its minecarts, animals and dropped items are.
+     *
+     * <p>Apart from the players for the same reason the players are apart from the blocks: a receiver
+     * knows what a message is before reading it, and the rates can be told apart in the broker's own
+     * statistics. A shard with a rail line along a seam and nobody near it sends these and no player
+     * announcements at all.</p>
+     */
+    public static final String MIRROR_MOB_EXCHANGE = "shards.mirror.mobs";
+    // The same two ticks, and for the same reason: a minecart's position is only ever the latest one
+    public static final int MIRROR_MOB_TTL_MILLIS = 100;
+
     public static final String REPLY_QUEUE_PREFIX = "shards.replies.";
 
     /**

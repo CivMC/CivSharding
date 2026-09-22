@@ -25,6 +25,7 @@ import java.util.logging.Logger;
 import net.civmc.shards.api.BorderProbeRequest;
 import net.civmc.shards.api.ChunkStateRequest;
 import net.civmc.shards.api.ChunkUpdateMessage;
+import net.civmc.shards.api.MobPositionMessage;
 import net.civmc.shards.api.PlayerPositionMessage;
 import net.civmc.shards.api.ChunkStateResponse;
 import net.civmc.shards.api.NightSkipRequest;
@@ -286,6 +287,11 @@ public final class ShardsClient implements AutoCloseable {
     public void publishPlayerPositions(final PlayerPositionMessage positions) {
         announce(ShardsRabbitMqTopology.MIRROR_PLAYER_EXCHANGE, positions,
             ShardsRabbitMqTopology.MIRROR_PLAYER_TTL_MILLIS);
+    }
+
+    public void publishMobPositions(final MobPositionMessage positions) {
+        announce(ShardsRabbitMqTopology.MIRROR_MOB_EXCHANGE, positions,
+            ShardsRabbitMqTopology.MIRROR_MOB_TTL_MILLIS);
     }
 
     private <RES> CompletableFuture<RES> publish(final String queue, final UUID requestId, final Object body,

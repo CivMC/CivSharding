@@ -66,6 +66,28 @@ hide-unowned-entities: true
 # or picked up. The border stays exactly as impermeable as it was - this only changes what is drawn.
 mirror-chunks: true
 
+# Whether this server draws the minecarts, animals and dropped items a neighbouring shard has, and
+# tells the other shards about its own.
+#
+# The rest of the mirror is scenery and people. This is everything else that moves, which turns out
+# to be most of what makes a place look lived in: a cart running the rail beside a seam, a farm's
+# animals in their pen, an item somebody dropped where they died. A border with every building drawn
+# and none of this reads as a diorama.
+#
+# Nothing is written and nothing exists here - these are packets, like the mirrored players, so there
+# is nothing to hit, shear, kill or pick up, and nothing that could be duplicated.
+#
+# Its own switch because it is the one part of the mirror that costs something every tick whether or
+# not anybody is near a border: the things near this shard's own outline are gathered and sent sixty
+# times a second. Only what this shard owns is sent - its own animals wandering a neighbour's fields
+# are nobody's business, the same ones hide-unowned-entities already hides from its own players.
+#
+# What is not drawn: a baby is drawn full grown, a horse in the wrong colours and a boat in oak,
+# because each of those is a numbered metadata field that cannot be identified by its type - and a
+# guessed field number once took every player on both shards offline. A dropped item's stack is the
+# exception, since an item field can be told by its type alone.
+mirror-moving-entities: true
+
 # Whether what the neighbouring shards have said is kept across a restart.
 #
 # Without it, everything a neighbour has told this server lives only in memory. A restart throws it
@@ -86,8 +108,8 @@ mirror-chunks: true
 # it, which holds because every block change past the border is already refused.
 save-mirror: true
 
-# How deep a strip of each neighbour's ground this server brings its own copy of up to date at
-# startup, in chunks. Zero switches it off.
+# How deep a strip of each neighbour's ground this server keeps its own copy of up to date, in
+# chunks. Read from its owners at startup and kept current from then on. Zero switches it off.
 #
 # Every shard starts as a copy of the same world and from then on only ever changes its own ground,
 # so this server's copy of its neighbours' land is that land as it was on the day of the split. The
@@ -108,6 +130,12 @@ save-mirror: true
 # Opportunistic: a neighbour that is still starting up is skipped rather than waited for, and asked
 # again every minute until it answers. Ground owned by nobody is left alone - this server's copy of
 # it is already the best there is.
+#
+# Kept up to date afterwards, not only read once. The shards already tell each other about blocks
+# changing near their own outlines, so that the mirror can draw them; whatever falls inside this band
+# is written into this server's own world as well. Without that, the strip is only as fresh as the
+# last restart, and a neighbour who demolishes a wall at noon leaves everyone here walking into it
+# until tomorrow. Setting this to 0 turns both halves off together.
 border-band-chunks: 2
 
 # What the border between shards is drawn with, where a player can see one.

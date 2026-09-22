@@ -20,6 +20,10 @@ import net.civmc.shards.paper.border.ShardRespawnListener;
 import net.civmc.shards.paper.border.TransferService;
 import net.civmc.shards.paper.config.ShardsPaperConfig;
 import net.civmc.shards.paper.mirror.BorderBandSync;
+import net.civmc.shards.paper.mirror.BorderBandUpdates;
+import net.civmc.shards.paper.mirror.MirrorMobPublisher;
+import net.civmc.shards.paper.mirror.MirrorMobView;
+import net.civmc.shards.paper.mirror.MirrorMobs;
 import net.civmc.shards.paper.mirror.ChunkRevisions;
 import net.civmc.shards.paper.mirror.EntityDataLayout;
 import net.civmc.shards.paper.mirror.LearnedEntityDataLayout;
@@ -38,6 +42,7 @@ import net.civmc.shards.paper.mirror.MirrorUpdatePublisher;
 import net.civmc.shards.paper.mirror.MirrorView;
 import net.civmc.shards.paper.mirror.UnownedEntityView;
 import net.civmc.shards.paper.mirror.UnownedGroundListener;
+import net.civmc.shards.paper.mirror.UnownedTakingsListener;
 import net.civmc.shards.paper.playerdata.OwnedPlayers;
 import net.civmc.shards.paper.playerdata.PlayerDataListener;
 import net.civmc.shards.paper.rabbitmq.ShardsClient;
@@ -111,7 +116,8 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         final ArrivalCue arrivalCue = new ArrivalCue(this.config.arrivalTitle(), this.config.arrivalSubtitle());
         getServer().getPluginManager().registerEvents(
             new PlayerDataListener(this, this.client, this.config.serverName(), this.config.failureMessage(),
-                this.owned, this.transfers, () -> this.startupComplete, arrivalCue), this);
+                this.owned, this.transfers, () -> this.startupComplete, this.border::isConfigured,
+                arrivalCue), this);
         if (!arrivalCue.isConfigured()) {
             getLogger().info("No arrival title configured, so a crossing into this shard is unannounced");
         }
@@ -126,6 +132,10 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         getCommand("shardsnapshot").setExecutor(new SnapshotVerifyCommand());
         startSkySync();
         startUnownedEntityView();
+        // Not inside the method above: that one is switched off by hide-unowned-entities, which is a
+        // question about what a border looks like and what can be farmed near it. This is a question
+        // about what a player walks away with, and is not the operator's to turn off
+        getServer().getPluginManager().registerEvents(new UnownedTakingsListener(this.border), this);
         startEntitySweep();
         startMirror(outlook);
         startPeriodicSave();
@@ -262,6 +272,9 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         // Before the players, who are now drawn with two numbered fields of their own
         this.entityDataLayout = startEntityDataLayout();
         final MirrorPlayers players = startPlayerMirror();
+        // Everything else that moves: a minecart on a rail beside a seam, a farm's animals, a dropped
+        // item. The last of what a border was still missing once the buildings and the people were on
+        final MirrorMobs mobs = startMobMirror();
         // As far as the client renders, which is what has to look right. The neighbour's own view
         // distance does not come into it - it is this server's players who are looking
         final MirrorView mirror = new MirrorView(this, this.border, outlook, this.client,
@@ -269,18 +282,30 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             startEntityMirror());
         this.mirror = mirror;
         startMirrorStore(mirror);
+        final BorderBandSync bandSync = new BorderBandSync(this, this.border, this.client, mirror,
+            this.config.serverName(), getLogger(), this.config.borderBandChunks());
+        // The same band, kept up to date for the rest of the server's life rather than only at the
+        // moment it started: a neighbour that digs out their side of a seam at noon would otherwise
+        // leave this server simulating against a wall that has not been there since the morning
+        final BorderBandUpdates bandUpdates = new BorderBandUpdates(this, bandSync, mirror, getLogger());
         this.mirrorServer = new ShardsServer(this.config.connectionFactory(), this.config.serverName(), this,
             getLogger(), new ChunkStateProvider(this.border, revisions), metrics,
-            // Announcements arrive on a broker thread and these read the world and send to players
-            update -> getServer().getScheduler().runTask(this, () -> mirror.applyUpdate(update)),
-            positions -> getServer().getScheduler().runTask(this, () -> players.apply(positions)));
+            // Announcements arrive on a broker thread and these read the world and send to players.
+            // The ground first, so that the mirror finds this server's own block already agreeing and
+            // draws nothing over it rather than caching a picture of what is really there
+            update -> getServer().getScheduler().runTask(this, () -> {
+                bandUpdates.apply(update);
+                mirror.applyUpdate(update);
+            }),
+            positions -> getServer().getScheduler().runTask(this, () -> players.apply(positions)),
+            movers -> getServer().getScheduler().runTask(this, () -> mobs.apply(movers)));
         this.mirrorServer.start();
         getServer().getPluginManager().registerEvents(mirror, this);
 
         // Before anything is drawn and while nobody is on: what this writes is the ground itself, and
         // the mirror's picture of a chunk is a difference from that ground
-        new BorderBandSync(this, this.border, this.client, mirror, this.config.serverName(),
-            getLogger(), this.config.borderBandChunks()).start();
+        bandSync.start();
+        getServer().getScheduler().runTaskTimer(this, bandUpdates::drain, 1L, 1L);
         // A refused placement makes the client correct itself to what is really there, which for
         // another shard's ground is this server's own copy - so the mirror has to be drawn again
         getServer().getPluginManager().registerEvents(new MirrorRepairListener(this, mirror), this);
@@ -313,6 +338,16 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             this.config.serverName());
         getServer().getScheduler().runTaskTimer(this, playerPublisher::publish, 1L, 1L);
         getServer().getScheduler().runTaskTimer(this, players::expire, 20L, 20L);
+
+        // And where this shard's minecarts, animals and dropped items are, on the same tick and the
+        // same terms. Sent whether or not this server can draw a neighbour's: a neighbour may be able
+        // to draw ours even where we cannot draw theirs
+        if (this.config.mirrorMovingEntities()) {
+            final MirrorMobPublisher mobPublisher = new MirrorMobPublisher(this.border, this.client,
+                this.config.serverName(), getLogger());
+            getServer().getScheduler().runTaskTimer(this, mobPublisher::publish, 1L, 1L);
+            getServer().getScheduler().runTaskTimer(this, mobs::expire, 20L, 20L);
+        }
         getServer().getScheduler().runTaskTimer(this, () -> {
             for (final Player player : Bukkit.getOnlinePlayers()) {
                 mirror.update(player);
@@ -396,6 +431,38 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             getLogger().log(Level.SEVERE, "PacketEvents is installed but could not be used, so the "
                 + "frames and stands on other shards will not be drawn", exception);
             return MirrorEntities.NONE;
+        }
+    }
+
+    /**
+     * Starts drawing what moves on a neighbouring shard.
+     *
+     * <p>Its own switch on the packet library, like the frames and the players, and its own quiet
+     * fallback: a shard that cannot draw a neighbour's minecarts still draws their buildings, their
+     * shops and the people standing in them.</p>
+     */
+    private MirrorMobs startMobMirror() {
+        if (!this.config.mirrorMovingEntities()) {
+            getLogger().info("Not drawing what moves on the neighbouring shards, and not telling them "
+                + "what moves here: their pens will look empty and their rails unused");
+            return MirrorMobs.NONE;
+        }
+        final Plugin packetEvents = getServer().getPluginManager().getPlugin("packetevents");
+        if (packetEvents == null || !packetEvents.isEnabled()) {
+            getLogger().info("PacketEvents is not installed, so the minecarts, animals and dropped "
+                + "items on other shards will not be drawn. Their buildings still are");
+            return MirrorMobs.NONE;
+        }
+        try {
+            final MirrorMobView view = new MirrorMobView(
+                this.entityDataLayout instanceof LearnedEntityDataLayout learned ? learned : null);
+            getServer().getPluginManager().registerEvents(view, this);
+            return view;
+        } catch (final RuntimeException | LinkageError exception) {
+            getLogger().log(Level.SEVERE, "PacketEvents is installed but could not be used, so what "
+                + "moves on other shards will not be drawn. Everything else about the mirror is "
+                + "unaffected", exception);
+            return MirrorMobs.NONE;
         }
     }
 
@@ -513,15 +580,20 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             retryStartupHandshake();
             return;
         }
-        this.startupComplete = true;
         getLogger().info("Released " + response.releasedLockCount() + " stale player data locks for "
             + this.config.serverName());
 
         // The proxy is the only holder of the shard map, so the areas this server owns arrive with the
-        // startup answer rather than being configured a second time here
+        // startup answer rather than being configured a second time here.
+        // Set before logins are allowed, not after: the areas are also what says whether this is a
+        // shard at all, and a login slipping through the gap between would be read as being on a
+        // server that owns nothing - so it would join a real shard with nobody holding its data
         this.border.set(response.regions());
+        this.startupComplete = true;
         if (response.regions().isEmpty()) {
-            getLogger().info("This server owns no shard areas, so no border is enforced");
+            getLogger().info("This server owns no shard areas, so no border is enforced and no player "
+                + "data is owned here: whoever is on this server keeps what is on its own disk, and "
+                + "the copy the shards share is left alone");
         } else {
             getLogger().info("Enforcing " + response.regions().size() + " shard area(s)");
         }

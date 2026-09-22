@@ -12,7 +12,6 @@ import java.nio.file.Path;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import net.civmc.shards.api.ShardServerId;
 import net.civmc.shards.velocity.config.ShardsConfig;
@@ -84,7 +83,8 @@ public final class ShardsVelocityPlugin {
         this.requestConsumer = new ShardsRequestConsumer(shardsConfig.rabbitmq().connectionFactory(),
             List.of(
                 new ServerStartupHandler(this.playerDataService, this.shardPlacementService, this.logger),
-                new PlayerClaimHandler(this.playerDataService, inFlightTransfers, this.logger),
+                new PlayerClaimHandler(this.playerDataService, this.shardPlacementService, inFlightTransfers,
+                    this.logger),
                 new PlayerSaveHandler(this.playerDataService, this.logger),
                 new PlayerCheckpointHandler(this.playerDataService, this.logger),
                 new PlayerReleaseHandler(this.playerDataService, this.logger),
@@ -164,16 +164,18 @@ public final class ShardsVelocityPlugin {
     }
 
     /**
-     * Every server that owns player data under a name of its own - the shards, and the holding
-     * server, which is not a shard but holds a player while they are on it.
+     * Every server that owns player data under a name of its own, which is exactly the shards.
+     *
+     * <p>The holding server used to be counted here as well, on the reading that it held a player
+     * while they stood on it. It does not: a server outside the shard map is refused a lock, so it
+     * can never be holding one for the expiry to drop or for an operator to trace. Listing it would
+     * be pinging a server about locks it is not allowed to take.</p>
+     *
+     * <p>Named for what it means rather than kept as a synonym for the shard names, because the two
+     * are the same set only for as long as owning ground and owning players stay the same thing.</p>
      */
     private static List<String> dataOwningServers(final ShardsConfig shardsConfig) {
-        final Set<String> serverNames = new LinkedHashSet<>(shardsConfig.shards().keySet());
-        // The holding server is not a shard, but it owns a player's data while they are on it
-        if (!shardsConfig.holdingServer().isEmpty()) {
-            serverNames.add(shardsConfig.holdingServer());
-        }
-        return List.copyOf(serverNames);
+        return List.copyOf(new LinkedHashSet<>(shardsConfig.shards().keySet()));
     }
 
     @Subscribe

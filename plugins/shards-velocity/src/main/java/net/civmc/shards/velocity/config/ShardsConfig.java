@@ -68,6 +68,7 @@ public record ShardsConfig(
             // Not Map.copyOf: two shards can no longer claim the same block, but a stable iteration
             // order still keeps startup errors and lookups reproducible between restarts
             : Collections.unmodifiableMap(new LinkedHashMap<>(shards));
+        requireAreas(shards);
         requireChunkAligned(shards);
         requireNoOverlap(shards);
     }
@@ -104,6 +105,28 @@ public record ShardsConfig(
         } catch (final IOException exception) {
             // Includes SerializationException, e.g. a required database key is missing
             throw new RuntimeException("Could not load Shards Velocity config", exception);
+        }
+    }
+
+    /**
+     * A shard has to own some ground.
+     *
+     * <p>Being in this map is what makes a server a shard, and being a shard is what makes it own the
+     * players on it. Everything downstream reads those two as the same thing: a server is told its
+     * own areas at startup and takes that empty answer to mean it is not a shard, so a name listed
+     * here with nothing under it would be a server that claims player data by one rule and refuses to
+     * enforce a border by the other.</p>
+     *
+     * <p>Refused rather than ignored, because the fix is never in doubt. A server that should own no
+     * ground is simply not listed here - that is what the holding server is.</p>
+     */
+    private static void requireAreas(final Map<String, List<ShardRegion>> shards) {
+        for (final Map.Entry<String, List<ShardRegion>> shard : shards.entrySet()) {
+            if (shard.getValue() == null || shard.getValue().isEmpty()) {
+                throw new IllegalArgumentException("Shard " + shard.getKey() + " is listed with no areas. A "
+                    + "shard owns ground and owns the players standing on it; a server that should own "
+                    + "neither belongs outside this map, like the holding server");
+            }
         }
     }
 

@@ -42,12 +42,25 @@ rabbitmq:
 #
 # The key is the server name, and that name is also the identity the server owns player data
 # under - so renaming one here abandons every lock held under its old name.
+#
+# Being listed here is also what makes a server share the network's player data. The shards named
+# below hand one inventory between them: a player leaving one has it written back, and the next one
+# they arrive on loads it. A server that is not listed - the holding server below, and anything else
+# on the proxy - is outside that entirely. Nothing is loaded for a player there, no lock is taken on
+# their behalf, and nothing they do there is written back, so it keeps its own player data the way
+# an unproxied server does. That is why a lobby cannot spend a player's inventory, and why standing
+# in one never stops a shard from loading them.
+#
+# A shard listed with no areas is refused at startup: owning ground and owning the players on it are
+# the same thing here, and a server meant to own neither belongs outside this map.
 shards:
   main:
     - vertices: [{x: -10000, z: -10000}, {x: 0, z: -10000}, {x: 0, z: 10000}, {x: -10000, z: 10000}]
   zorweth:
     - vertices: [{x: 0, z: -10000}, {x: 10000, z: -10000}, {x: 10000, z: 10000}, {x: 0, z: 10000}]
 
+# Where a player goes when no shard owns the place they were last seen, and where they land when
+# they have never played before. Not a shard: it is not listed above, so it holds no player data.
 holding-server: "pvp"
 
 # Whether this proxy answers /list for the whole network. A shard's own /list knows only the people

@@ -33,7 +33,11 @@ import org.bukkit.block.data.BlockData;
 import org.bukkit.plugin.java.JavaPlugin;
 
 /**
- * Brings this server's own copy of the ground just past its borders up to date, once, at startup.
+ * Brings this server's own copy of the ground just past its borders up to date at startup.
+ *
+ * <p>The startup half only. What keeps that strip up to date for the rest of the server's life is
+ * {@link BorderBandUpdates}, which writes the same ground from the announcements the shards already
+ * send each other - and uses this class's record of who owns which chunk to know what the band is.</p>
  *
  * <p>Every shard begins as a copy of the same world, and from then on each one only ever changes its
  * own ground. So a shard's copy of its neighbour's land is that land as it was at the split: the
@@ -93,6 +97,10 @@ public final class BorderBandSync {
     private List<Long> columns = List.of();
     private List<String> worlds = List.of();
     private final Deque<ChunkKey> waiting = new ArrayDeque<>();
+    // Queued or in flight: a chunk this server has asked its owner for and not yet written. What
+    // arrives for one of these describes the chunk as it was when the read was asked for, so a change
+    // announced in the meantime is newer than the answer on its way - see readAgainNow
+    private final Set<ChunkKey> reading = new HashSet<>();
     private final Deque<Runnable> writing = new ArrayDeque<>();
     private final AtomicInteger inFlight = new AtomicInteger();
     private final AtomicInteger read = new AtomicInteger();
@@ -264,7 +272,9 @@ public final class BorderBandSync {
                 continue;
             }
             for (final String world : this.worlds) {
-                this.waiting.add(new ChunkKey(world, chunkX(band), chunkZ(band)));
+                final ChunkKey key = new ChunkKey(world, chunkX(band), chunkZ(band));
+                this.waiting.add(key);
+                this.reading.add(key);
             }
         }
         if (this.waiting.isEmpty()) {
@@ -306,11 +316,13 @@ public final class BorderBandSync {
             // and it is asked for again: the usual reason is that it had not finished booting
             this.unanswered.incrementAndGet();
             this.readAgain.add(key);
+            this.reading.remove(key);
             finishIfDone();
             return;
         }
         final World world = Bukkit.getWorld(key.world());
         if (world == null) {
+            this.reading.remove(key);
             finishIfDone();
             return;
         }
@@ -319,6 +331,7 @@ public final class BorderBandSync {
             theirs = ChunkStateCodec.fromBytes(Base64.getDecoder().decode(response.state()));
         } catch (final RuntimeException unreadable) {
             this.logger.log(Level.WARNING, "Could not read " + key + " as its owner sent it", unreadable);
+            this.reading.remove(key);
             finishIfDone();
             return;
         }
@@ -335,10 +348,12 @@ public final class BorderBandSync {
                             final Throwable failure) {
         if (failure != null) {
             this.logger.log(Level.WARNING, "Could not compare " + key + " with our own copy", failure);
+            this.reading.remove(key);
             finishIfDone();
             return;
         }
         if (changed == null || changed.isEmpty()) {
+            this.reading.remove(key);
             finishIfDone();
             return;
         }
@@ -359,6 +374,7 @@ public final class BorderBandSync {
                 .setBlockData(block.getValue(), false);
         }
         this.written.addAndGet(changed.size());
+        this.reading.remove(key);
         // What the mirror worked out about this chunk was worked out against a copy that has just
         // moved underneath it, so it is not a difference from anything any more
         this.mirror.forgetChunk(key);
@@ -463,6 +479,61 @@ public final class BorderBandSync {
             }
         }
         return changed;
+    }
+
+    /**
+     * Which shard owns a chunk of the band, or {@code null} for one outside it.
+     *
+     * <p>The band's own record of who owns what, kept rather than thrown away when the startup pass
+     * finishes, because it is also the answer to "is this chunk part of the band at all". Ground
+     * nobody owns is in {@link #columns} and not in here, which is the same as being outside: there
+     * is no owner to be more up to date than this server.</p>
+     *
+     * <p>Asked of the proxy once, at startup, and not again. The shard map does not change while the
+     * network is up - a shard that gained ground would need every neighbour told, and nothing in the
+     * stack does that yet.</p>
+     */
+    public String ownerOf(final String world, final int chunkX, final int chunkZ) {
+        if (!this.worlds.contains(world)) {
+            return null;
+        }
+        return this.owners.get(column(chunkX, chunkZ));
+    }
+
+    /**
+     * Whether this chunk has been asked for and not yet written.
+     */
+    public boolean isReading(final ChunkKey key) {
+        return this.reading.contains(key);
+    }
+
+    /**
+     * Asks for a chunk again, now, because what this server is about to write to it is newer than the
+     * answer already on its way.
+     *
+     * <p>The startup read describes a chunk as it was when the read was asked for. A neighbour that
+     * changes a block in the moments after that has announced something newer than the answer in
+     * flight, and applying the answer afterwards would put the old block back. Reading again is
+     * enough: the second read is asked for after the change, so it carries it.</p>
+     *
+     * <p>Bounded by the fact that changes are rare during a startup pass with nobody online. A
+     * neighbour building furiously through one would have this ask repeatedly, and each round is one
+     * chunk read - the same cost the pass was already paying for that chunk.</p>
+     */
+    public void readAgainNow(final ChunkKey key) {
+        if (this.owners.get(column(key.x(), key.z())) == null) {
+            return;
+        }
+        this.waiting.add(key);
+        this.reading.add(key);
+        if (!this.running) {
+            // The pass had reported itself finished, which it can do while a chunk is still being
+            // compared off the main thread. Time it from here, so the summary this one ends with
+            // describes this round rather than measuring from the original startup
+            this.running = true;
+            this.startedAt = System.nanoTime();
+        }
+        fillTheQueue();
     }
 
     private static long column(final int chunkX, final int chunkZ) {

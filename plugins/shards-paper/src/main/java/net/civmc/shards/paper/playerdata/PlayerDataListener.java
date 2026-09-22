@@ -41,6 +41,11 @@ import org.bukkit.scheduler.BukkitTask;
 /**
  * Takes ownership of a player's data as they connect and gives it up when they leave.
  *
+ * <p>Only on a shard. A server the proxy does not have in its shard map - the holding lobby, where
+ * what a player carries is nothing to do with what they carry on the shards - takes no ownership of
+ * anybody, so nothing it does to a player is ever written back and nobody standing in it keeps a
+ * shard from loading them.</p>
+ *
  * <p>Ownership is taken at {@link AsyncPlayerPreLoginEvent} rather than on join. That event runs off
  * the main thread, so waiting on the proxy there costs nothing, and it happens before any player
  * object exists - which means a refusal is a login that never happened rather than a player who has
@@ -85,6 +90,9 @@ public final class PlayerDataListener implements Listener {
     private final OwnedPlayers owned;
     private final TransferService transfers;
     private final BooleanSupplier startupComplete;
+    // Whether this server is a shard at all, which it only knows once the proxy has answered: the
+    // areas it owns arrive with the startup handshake, and a server that owns none is not a shard
+    private final BooleanSupplier shard;
     private final ArrivalCue arrivalCue;
     // Told to us by the proxy, which is the only side that can tell a crossing from a login: both
     // claim a lock and restore a snapshot, and from here they are identical
@@ -93,7 +101,7 @@ public final class PlayerDataListener implements Listener {
     public PlayerDataListener(final JavaPlugin plugin, final ShardsClient client, final String serverName,
                               final String failureMessage, final OwnedPlayers owned,
                               final TransferService transfers, final BooleanSupplier startupComplete,
-                              final ArrivalCue arrivalCue) {
+                              final BooleanSupplier shard, final ArrivalCue arrivalCue) {
         this.plugin = plugin;
         this.client = client;
         this.logger = plugin.getLogger();
@@ -102,6 +110,7 @@ public final class PlayerDataListener implements Listener {
         this.owned = owned;
         this.transfers = transfers;
         this.startupComplete = startupComplete;
+        this.shard = shard;
         this.arrivalCue = arrivalCue;
     }
 
@@ -114,6 +123,13 @@ public final class PlayerDataListener implements Listener {
         if (!this.startupComplete.getAsBoolean()) {
             refuse(event, "the startup handshake has not completed, so this server has no shard areas yet",
                 null, NOT_READY_MESSAGE);
+            return;
+        }
+        // Nothing is claimed for a server that owns no ground. The shards share one inventory between
+        // them; a lobby is outside that, so a player there keeps whatever this server has on disk and
+        // the shared copy is left exactly as the shard they came from wrote it - unlocked, so the next
+        // shard they walk onto can load it straight away
+        if (!this.shard.getAsBoolean()) {
             return;
         }
         final long askedAt = System.nanoTime();
@@ -153,6 +169,13 @@ public final class PlayerDataListener implements Listener {
             // Keep whatever is on disk. Treating this as an authoritative empty player would wipe
             // everyone at once the first time the table is empty
             case NEW_PLAYER -> take(playerUuid);
+            // Only reachable when this server thinks it is a shard and the proxy does not, since the
+            // check above is the same rule read from the same answer. Let them in owning nothing,
+            // which is what the proxy has just done, and say which side to correct
+            case NOT_A_SHARD -> this.logger.warning("The proxy does not have " + this.serverName
+                + " in its shard map, so no lock was taken on " + playerUuid + " and nothing they do "
+                + "here will be written back. This server believes it owns shard areas, so the two "
+                + "disagree: check the proxy's config.yml");
             case HELD_BY_OTHER -> refuse(event,
                 "data still held by " + response.heldBy() + " after waiting "
                     + CONTENDED_CLAIM_BUDGET_MILLIS + "ms; the previous server has not released it",
