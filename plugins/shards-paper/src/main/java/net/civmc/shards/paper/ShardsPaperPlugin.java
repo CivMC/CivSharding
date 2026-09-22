@@ -9,6 +9,7 @@ import net.civmc.shards.api.ServerStartupResponse;
 import net.civmc.shards.paper.border.ArrivalCue;
 import net.civmc.shards.api.ShardsRabbitMqTopology;
 import net.civmc.shards.paper.border.BorderNotices;
+import net.civmc.shards.paper.border.BorderEntitySweep;
 import net.civmc.shards.paper.border.BorderOutlook;
 import net.civmc.shards.paper.border.BorderRenderer;
 import net.civmc.shards.paper.border.BorderView;
@@ -20,6 +21,9 @@ import net.civmc.shards.paper.border.ShardBorderListener;
 import net.civmc.shards.paper.border.ShardRespawnListener;
 import net.civmc.shards.paper.border.TransferService;
 import net.civmc.shards.paper.config.ShardsPaperConfig;
+import net.civmc.shards.paper.mirror.UnownedEntityView;
+import net.civmc.shards.paper.mirror.UnownedGroundListener;
+import net.civmc.shards.paper.mirror.UnownedTakingsListener;
 import net.civmc.shards.paper.playerdata.OwnedPlayers;
 import net.civmc.shards.paper.playerdata.PlayerDataListener;
 import net.civmc.shards.paper.rabbitmq.ShardsClient;
@@ -56,6 +60,7 @@ public final class ShardsPaperPlugin extends JavaPlugin {
     private ShardsClient client;
     private OwnedPlayers owned;
     private TransferService transfers;
+    private BorderEntitySweep entitySweep;
     private final ShardBorder border = new ShardBorder();
     // Read from the login thread, written from whichever thread the startup answer arrives on
     private volatile boolean startupComplete;
@@ -93,6 +98,10 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(
             new ShardRespawnListener(this, this.border, this.transfers, getLogger()), this);
         startUnownedEntityView();
+        // Not inside the method above: that one is switched off by hide-unowned-entities, which is a
+        // question about what a border looks like and what can be farmed near it. This is a question
+        // about what a player walks away with, and is not the operator's to turn off
+        getServer().getPluginManager().registerEvents(new UnownedTakingsListener(this.border), this);
         startEntitySweep();
     }
 
@@ -142,10 +151,14 @@ public final class ShardsPaperPlugin extends JavaPlugin {
                 + "mobs and items standing past its border, which no other shard can see");
             return;
         }
+        final UnownedEntityView view = new UnownedEntityView(this, this.border);
+        getServer().getPluginManager().registerEvents(view, this);
+        getServer().getPluginManager().registerEvents(new UnownedGroundListener(this.border), this);
         // Slow, because it only exists to catch entities that wandered out after they were already
         // being shown. Everything arriving is caught by the tracking event, which costs nothing
         getServer().getScheduler().runTaskTimer(this, () -> {
             for (final Player player : Bukkit.getOnlinePlayers()) {
+                view.sweep(player);
             }
         }, UNOWNED_SWEEP_TICKS, UNOWNED_SWEEP_TICKS);
     }
@@ -160,6 +173,10 @@ public final class ShardsPaperPlugin extends JavaPlugin {
      * loaded.</p>
      */
     private void startEntitySweep() {
+        final BorderEntitySweep sweep = new BorderEntitySweep(this.border, getLogger());
+        this.entitySweep = sweep;
+        getServer().getPluginManager().registerEvents(sweep, this);
+        getServer().getScheduler().runTaskTimer(this, () -> sweep.sweep(getServer().getWorlds()), 1L, 1L);
     }
 
 
