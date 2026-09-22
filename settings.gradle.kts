@@ -18,6 +18,7 @@ include(":ansible")
 
 include(":libraries:name-api")
 include(":libraries:namelayer-sync")
+include(":libraries:shards-api")
 
 include(":plugins:announcements-velocity")
 include(":plugins:banstick-paper")
@@ -54,3 +55,5 @@ include(":plugins:zorweth-velocity")
 include(":plugins:civproxy-velocity")
 include(":plugins:secureboot-paper")
 include(":plugins:kiragateway-velocity")
+include(":plugins:shards-velocity")
+include(":plugins:shards-paper")
