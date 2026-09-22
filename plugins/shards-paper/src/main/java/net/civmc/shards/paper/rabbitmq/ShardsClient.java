@@ -27,6 +27,11 @@ import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import net.civmc.shards.api.BorderProbeRequest;
+import net.civmc.shards.api.ChunkStateRequest;
+import net.civmc.shards.api.ChunkUpdateMessage;
+import net.civmc.shards.api.MobPositionMessage;
+import net.civmc.shards.api.PlayerPositionMessage;
+import net.civmc.shards.api.ChunkStateResponse;
 import net.civmc.shards.api.BorderProbeResponse;
 import net.civmc.shards.api.PlayerCheckpointRequest;
 import net.civmc.shards.api.PlayerCheckpointResponse;
@@ -215,13 +220,81 @@ public final class ShardsClient implements AutoCloseable {
 
 
 
+    /**
+     * Asks the shard that owns a chunk what is really in it.
+     *
+     * <p>Addressed to that shard rather than to the proxy, which is the only message here that is:
+     * the proxy holds the shard map but not a world, so it can say whose chunk it is and nothing
+     * more.</p>
+     */
+    public CompletableFuture<ChunkStateResponse> chunkState(final String targetServer,
+                                                            final ChunkStateRequest request) {
+        return publish(ShardsRabbitMqTopology.mirrorQueue(targetServer), request.requestId(), request,
+            ChunkStateResponse.class);
+    }
 
     public CompletableFuture<PlayerReleaseResponse> release(final PlayerReleaseRequest request) {
         return publish(ShardsRabbitMqTopology.PLAYER_RELEASE_QUEUE, request.requestId(), request,
             PlayerReleaseResponse.class);
     }
 
+    /**
+     * Announces blocks that have just changed, to every shard at once.
+     *
+     * <p>Fire and forget, and not durable: an announcement nobody is listening for is of no use, and
+     * one that arrives late is worse than none - the receiver will have re-read the chunk by then, and
+     * applying a stale change on top would put back what was taken away.</p>
+     */
+    public void publishMirrorUpdate(final ChunkUpdateMessage update) {
+        announce(ShardsRabbitMqTopology.MIRROR_UPDATE_EXCHANGE, update,
+            ShardsRabbitMqTopology.MIRROR_UPDATE_TTL_MILLIS);
+    }
 
+
+
+    /**
+     * Listens to a fanout for as long as this client is connected.
+     *
+     * <p>Its own channel, because the driver dispatches one channel's deliveries on one thread in
+     * order: sharing the reply channel would have every announcement queue behind whatever reply was
+     * being handled, and the other way round.</p>
+     *
+     * <p>Our own announcements come back to us, a fanout going to everybody, and are dropped by the
+     * sender's name rather than by not binding - there is nothing to bind differently.</p>
+     */
+    public <T> void subscribe(final String exchange, final Class<T> type, final Function<T, String> sender,
+                              final Consumer<T> handler) {
+        final Runnable subscribe = () -> {
+            try {
+                final Channel announcements;
+                synchronized (this) {
+                    announcements = this.connection.createChannel();
+                }
+                announcements.exchangeDeclare(exchange, "fanout", false);
+                final String queue = announcements.queueDeclare().getQueue();
+                announcements.queueBind(queue, exchange, "");
+                announcements.basicConsume(queue, true, (consumerTag, delivery) -> {
+                    try {
+                        final T message = GSON.fromJson(
+                            new String(delivery.getBody(), StandardCharsets.UTF_8), type);
+                        if (message != null && !this.serverName.equals(sender.apply(message))) {
+                            handler.accept(message);
+                        }
+                    } catch (final RuntimeException exception) {
+                        this.logger.log(Level.FINE, "Dropping a malformed announcement on " + exchange,
+                            exception);
+                    }
+                }, consumerTag -> {
+                });
+            } catch (final IOException | RuntimeException exception) {
+                this.logger.log(Level.WARNING, "Could not listen on " + exchange, exception);
+            }
+        };
+        this.subscriptions.add(subscribe);
+        if (this.ready) {
+            subscribe.run();
+        }
+    }
 
     /**
      * Sends something to everybody and does not wait to hear about it.
@@ -250,8 +323,19 @@ public final class ShardsClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Announces where this shard's players are, to every shard at once.
+     */
+    public void publishPlayerPositions(final PlayerPositionMessage positions) {
+        announce(ShardsRabbitMqTopology.MIRROR_PLAYER_EXCHANGE, positions,
+            ShardsRabbitMqTopology.MIRROR_PLAYER_TTL_MILLIS);
+    }
 
 
+    public void publishMobPositions(final MobPositionMessage positions) {
+        announce(ShardsRabbitMqTopology.MIRROR_MOB_EXCHANGE, positions,
+            ShardsRabbitMqTopology.MIRROR_MOB_TTL_MILLIS);
+    }
 
     private <RES> CompletableFuture<RES> publish(final String queue, final UUID requestId, final Object body,
                                                  final Class<RES> responseType) {
