@@ -27,6 +27,7 @@ import vg.civcraft.mc.civchat2.event.GlobalChatEvent;
 import vg.civcraft.mc.civchat2.event.GroupChatEvent;
 import vg.civcraft.mc.civchat2.event.PrivateMessageEvent;
 import vg.civcraft.mc.civchat2.prefix.StarManager;
+import vg.civcraft.mc.civchat2.shards.CrossShardChat;
 import vg.civcraft.mc.civchat2.utility.CivChat2Config;
 import vg.civcraft.mc.civchat2.utility.CivChat2FileLogger;
 import vg.civcraft.mc.civchat2.utility.ScoreboardHUD;
@@ -78,6 +79,8 @@ public class CivChat2Manager {
 
     private final StarManager starManager;
 
+    private final CrossShardChat crossShard;
+
     public CivChat2Manager(CivChat2 pluginInstance, ServerBroadcaster broadcaster, StarManager starManager) {
 
 
@@ -97,6 +100,7 @@ public class CivChat2Manager {
         muteTimeSeconds = config.getMuteTimeSeconds();
         banSetting = instance.getCivChat2SettingsManager().getGlobalChatMuteSetting();
         filterRelayGroup = config.getFilterRelayGroup();
+        crossShard = CrossShardChat.find(this);
     }
 
 
@@ -248,6 +252,7 @@ public class CivChat2Manager {
             range = newRange;
         }
 
+        Component displayName = getCustomName(sender);
         Set<String> receivers = new HashSet<>();
         // Loop through players and send to those that are close enough
         for (Player receiver : recipients) {
@@ -255,15 +260,8 @@ public class CivChat2Manager {
                 if (range <= 0 || receiver.getWorld().equals(sender.getWorld())) {
                     double receiverDistance = range <= 0 ? 0 : location.distance(receiver.getLocation());
                     if (receiverDistance <= range) {
-                        TextColor newColor;
-                        if (config.useDynamicRangeColoring()) {
-                            int comp = (int) (255 - (128.0 * receiverDistance) / range);
-                            newColor = TextColor.color(comp, comp, comp);
-                        } else {
-                            newColor = NamedTextColor.NAMES.valueOrThrow(config.getColorAtDistance(receiverDistance).toLowerCase());
-                        }
-
-                        receiver.sendMessage(messageFormat.render(sender, getCustomName(sender), Component.empty().color(newColor).append(chatMessage), receiver));
+                        receiver.sendMessage(messageFormat.render(sender, displayName,
+                            Component.empty().color(colorAtDistance(receiverDistance, range)).append(chatMessage), receiver));
                         receivers.add(receiver.getName());
                     }
                 }
@@ -271,6 +269,44 @@ public class CivChat2Manager {
         }
         receivers.remove(sender.getName());
         chatLog.logGlobalMessage(sender, PlainTextComponentSerializer.plainText().serialize(chatMessage), receivers);
+        // The same sentence to the shards next door, with the range this server worked out. Their
+        // players are not in the recipients above - they are not on this server at all - and a chat
+        // range is a distance rather than a thing a border stops
+        crossShard.speak(sender, location, range, displayName, chatMessage);
+    }
+
+    /**
+     * Delivers a line of local chat said by somebody on another shard.
+     *
+     * <p>The same range and the same colouring as a line said here, measured from where the speaker
+     * actually is. Their shard has already decided that the message may be sent at all - mutes, the
+     * word filter and the chat event are questions about the speaker, and are answered where they are
+     * standing.</p>
+     */
+    public void receiveRelayedMessage(UUID senderId, String senderName, Location location, int range,
+                                      Component displayName, Component chatMessage) {
+        for (Player receiver : Bukkit.getOnlinePlayers()) {
+            if (DBM.isIgnoringPlayer(receiver.getUniqueId(), senderId)) {
+                continue;
+            }
+            if (range > 0 && !receiver.getWorld().equals(location.getWorld())) {
+                continue;
+            }
+            double receiverDistance = range <= 0 ? 0 : location.distance(receiver.getLocation());
+            if (receiverDistance > range) {
+                continue;
+            }
+            receiver.sendMessage(ChatStrings.localChatLine(displayName,
+                Component.empty().color(colorAtDistance(receiverDistance, range)).append(chatMessage)));
+        }
+    }
+
+    private TextColor colorAtDistance(double receiverDistance, int range) {
+        if (config.useDynamicRangeColoring()) {
+            int comp = (int) (255 - (128.0 * receiverDistance) / range);
+            return TextColor.color(comp, comp, comp);
+        }
+        return NamedTextColor.NAMES.valueOrThrow(config.getColorAtDistance(receiverDistance).toLowerCase());
     }
 
     private Component getCustomName(Player sender) {

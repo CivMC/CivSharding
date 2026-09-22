@@ -38,6 +38,7 @@ import net.civmc.shards.api.CargoSendResponse;
 import net.civmc.shards.api.CargoStatusRequest;
 import net.civmc.shards.api.CargoStatusResponse;
 import net.civmc.shards.api.ChunkStateRequest;
+import net.civmc.shards.api.chat.LocalChatSpeech;
 import net.civmc.shards.api.ChunkUpdateMessage;
 import net.civmc.shards.api.MobPositionMessage;
 import net.civmc.shards.api.ParticleMessage;
@@ -410,6 +411,13 @@ public final class ShardsClient implements AutoCloseable {
             ShardsRabbitMqTopology.MIRROR_PLAYER_TTL_MILLIS);
     }
 
+    /**
+     * Announces what one of this shard's players has just said in local chat, to every shard at once.
+     */
+    public void publishLocalChat(final LocalChatSpeech speech) {
+        announce(ShardsRabbitMqTopology.LOCAL_CHAT_EXCHANGE, speech,
+            ShardsRabbitMqTopology.LOCAL_CHAT_TTL_MILLIS);
+    }
 
     public void publishMobPositions(final MobPositionMessage positions) {
         announce(ShardsRabbitMqTopology.MIRROR_MOB_EXCHANGE, positions,
