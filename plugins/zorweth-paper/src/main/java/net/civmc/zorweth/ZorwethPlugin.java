@@ -12,6 +12,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.util.logging.Level;
+import net.civmc.shards.paper.ShardsPaperPlugin;
 import net.civmc.zorweth.database.RocketTransferDao;
 import net.civmc.zorweth.database.ZorwethDatabase;
 import net.civmc.zorweth.flight.FlightComputerGui;
@@ -30,6 +31,7 @@ import net.civmc.zorweth.research.ResearchCommand;
 import net.civmc.zorweth.research.ResearchCurrency;
 import net.civmc.zorweth.research.ResearchDisplay;
 import net.civmc.zorweth.research.ResearchManager;
+import net.civmc.zorweth.transfer.ShardTransfers;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.configuration.ConfigurationSection;
@@ -97,9 +99,6 @@ public final class ZorwethPlugin extends JavaPlugin {
             getServer().getPluginManager().registerEvents(this.researchDisplay, this);
         }
         getServer().getPluginManager().registerEvents(this.stasisHandler, this);
-        if (getServer().getPluginManager().isPluginEnabled("CombatTagPlus")) {
-            getServer().getPluginManager().registerEvents(new RocketCombatLogListener(), this);
-        }
         getServer().getPluginManager().registerEvents(new FlightComputerGui(this), this);
         getServer().getPluginManager().registerEvents(new ArmourRepairKitListener(this), this);
         getServer().getPluginManager().registerEvents(new PhantomMembraneLoreListener(), this);
@@ -309,7 +308,9 @@ public final class ZorwethPlugin extends JavaPlugin {
         return stasisHandler;
     }
 
+
     public CrossServerOttManager getCrossServerOttManager() {
         return this.crossServerOttManager;
     }
+
 }
