@@ -2,12 +2,13 @@ package net.civmc.shards.paper.rabbitmq;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.google.gson.JsonParseException;
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.DeliverCallback;
+import com.rabbitmq.client.Recoverable;
+import com.rabbitmq.client.RecoveryListener;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.nio.charset.StandardCharsets;
@@ -21,6 +22,14 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import net.civmc.shards.api.PlayerClaimRequest;
+import net.civmc.shards.api.PlayerClaimResponse;
+import net.civmc.shards.api.PlayerReleaseRequest;
+import net.civmc.shards.api.PlayerReleaseResponse;
+import net.civmc.shards.api.PlayerSaveRequest;
+import net.civmc.shards.api.PlayerSaveResponse;
+import net.civmc.shards.api.PlayerTransferRequest;
+import net.civmc.shards.api.PlayerTransferResponse;
 import net.civmc.shards.api.ServerStartupRequest;
 import net.civmc.shards.api.ServerStartupResponse;
 import net.civmc.shards.api.ShardsRabbitMqTopology;
@@ -43,11 +52,12 @@ public final class ShardsClient implements AutoCloseable {
     private static final int REPLY_TTL_MILLIS = 20_000;
 
     private final ConnectionFactory connectionFactory;
+    private final String serverName;
     private final JavaPlugin plugin;
     private final Logger logger;
     private final Runnable onFirstConnect;
     private final AtomicBoolean firstConnectDone = new AtomicBoolean();
-    private final Map<UUID, CompletableFuture<ServerStartupResponse>> pendingResponses = new ConcurrentHashMap<>();
+    private final Map<UUID, Pending<?>> pendingResponses = new ConcurrentHashMap<>();
     private volatile boolean closed;
     private volatile boolean ready;
     private Connection connection;
@@ -58,9 +68,10 @@ public final class ShardsClient implements AutoCloseable {
      * @param onFirstConnect run once, after the first connection this client establishes. Reconnects
      *     deliberately do not run it: what it sends is only correct for a server with nobody online
      */
-    public ShardsClient(final ConnectionFactory connectionFactory, final JavaPlugin plugin, final Logger logger,
-                        final Runnable onFirstConnect) {
+    public ShardsClient(final ConnectionFactory connectionFactory, final String serverName,
+                        final JavaPlugin plugin, final Logger logger, final Runnable onFirstConnect) {
         this.connectionFactory = connectionFactory;
+        this.serverName = serverName;
         this.plugin = plugin;
         this.logger = logger;
         this.onFirstConnect = onFirstConnect;
@@ -68,6 +79,10 @@ public final class ShardsClient implements AutoCloseable {
 
     public boolean start() {
         return connect();
+    }
+
+    public boolean isReady() {
+        return this.ready;
     }
 
     private synchronized boolean connect() {
@@ -79,10 +94,16 @@ public final class ShardsClient implements AutoCloseable {
             this.channel = this.connection.createChannel();
             final Map<String, Object> arguments = new HashMap<>();
             arguments.put("x-message-ttl", REPLY_TTL_MILLIS);
-            this.replyQueue = this.channel.queueDeclare("", false, true, true, arguments).getQueue();
-            final DeliverCallback deliverCallback = (consumerTag, delivery) -> handleResponse(delivery.getBody());
+            // Named rather than left to the broker. A server-generated name changes when the client
+            // recovers the connection, and this reference to it would not - so every reply would be
+            // addressed to a queue that no longer exists, and be dropped without a word
+            this.replyQueue = ShardsRabbitMqTopology.replyQueue(this.serverName);
+            this.channel.queueDeclare(this.replyQueue, false, true, true, arguments);
+            final DeliverCallback deliverCallback = (consumerTag, delivery) ->
+                handleResponse(delivery.getProperties(), delivery.getBody());
             this.channel.basicConsume(this.replyQueue, true, deliverCallback, consumerTag -> {
             });
+            watchRecovery(this.connection);
             this.ready = true;
         } catch (final ConnectException exception) {
             this.logger.warning("Retrying RabbitMQ connection");
@@ -99,18 +120,62 @@ public final class ShardsClient implements AutoCloseable {
         return true;
     }
 
-    public CompletableFuture<ServerStartupResponse> send(final ServerStartupRequest request) {
-        return publish(ShardsRabbitMqTopology.SERVER_STARTUP_QUEUE, request.requestId(), request);
+    /**
+     * Says so when the client loses its connection and gets it back. The recovery happens inside the
+     * driver, so without this it is silent - and a recovery that leaves something subtly broken then
+     * looks like nothing happening at all.
+     */
+    private void watchRecovery(final Connection connection) {
+        if (!(connection instanceof Recoverable recoverable)) {
+            return;
+        }
+        recoverable.addRecoveryListener(new RecoveryListener() {
+            @Override
+            public void handleRecovery(final Recoverable recovered) {
+                ShardsClient.this.logger.info("RabbitMQ connection recovered; replies resume on "
+                    + ShardsClient.this.replyQueue);
+            }
+
+            @Override
+            public void handleRecoveryStarted(final Recoverable recovered) {
+                ShardsClient.this.logger.warning("RabbitMQ connection lost, recovering");
+            }
+        });
     }
 
-    private CompletableFuture<ServerStartupResponse> publish(final String queue, final UUID requestId,
-                                                             final Object body) {
-        final CompletableFuture<ServerStartupResponse> responseFuture = new CompletableFuture<>();
+    public CompletableFuture<ServerStartupResponse> startup(final ServerStartupRequest request) {
+        return publish(ShardsRabbitMqTopology.SERVER_STARTUP_QUEUE, request.requestId(), request,
+            ServerStartupResponse.class);
+    }
+
+    public CompletableFuture<PlayerClaimResponse> claim(final PlayerClaimRequest request) {
+        return publish(ShardsRabbitMqTopology.PLAYER_CLAIM_QUEUE, request.requestId(), request,
+            PlayerClaimResponse.class);
+    }
+
+    public CompletableFuture<PlayerSaveResponse> save(final PlayerSaveRequest request) {
+        return publish(ShardsRabbitMqTopology.PLAYER_SAVE_QUEUE, request.requestId(), request,
+            PlayerSaveResponse.class);
+    }
+
+    public CompletableFuture<PlayerTransferResponse> transfer(final PlayerTransferRequest request) {
+        return publish(ShardsRabbitMqTopology.PLAYER_TRANSFER_QUEUE, request.requestId(), request,
+            PlayerTransferResponse.class);
+    }
+
+    public CompletableFuture<PlayerReleaseResponse> release(final PlayerReleaseRequest request) {
+        return publish(ShardsRabbitMqTopology.PLAYER_RELEASE_QUEUE, request.requestId(), request,
+            PlayerReleaseResponse.class);
+    }
+
+    private <RES> CompletableFuture<RES> publish(final String queue, final UUID requestId, final Object body,
+                                                 final Class<RES> responseType) {
+        final CompletableFuture<RES> responseFuture = new CompletableFuture<>();
         if (!this.ready || this.channel == null || !this.channel.isOpen()) {
             responseFuture.completeExceptionally(new IllegalStateException("Not connected to RabbitMQ"));
             return responseFuture;
         }
-        this.pendingResponses.put(requestId, responseFuture);
+        this.pendingResponses.put(requestId, new Pending<>(responseType, responseFuture));
         responseFuture.orTimeout(RESPONSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .whenComplete((response, error) -> this.pendingResponses.remove(requestId));
         try {
@@ -130,21 +195,31 @@ public final class ShardsClient implements AutoCloseable {
         return responseFuture;
     }
 
-    private void handleResponse(final byte[] body) {
-        final ServerStartupResponse response;
+    private void handleResponse(final AMQP.BasicProperties properties, final byte[] body) {
+        // Matched on the correlation id rather than a field in the body, so a reply we cannot parse
+        // still completes its future with the failure instead of leaving the sender to time out
+        final UUID requestId = parseCorrelationId(properties);
+        if (requestId == null) {
+            this.logger.warning("Dropping a response with no correlation id");
+            return;
+        }
+        final Pending<?> pending = this.pendingResponses.remove(requestId);
+        if (pending == null) {
+            this.logger.log(Level.FINE, "Dropping unmatched response " + requestId);
+            return;
+        }
+        pending.complete(new String(body, StandardCharsets.UTF_8), this.logger);
+    }
+
+    private static UUID parseCorrelationId(final AMQP.BasicProperties properties) {
+        if (properties == null || properties.getCorrelationId() == null || properties.getCorrelationId().isBlank()) {
+            return null;
+        }
         try {
-            response = GSON.fromJson(new String(body, StandardCharsets.UTF_8), ServerStartupResponse.class);
-        } catch (final JsonParseException exception) {
-            this.logger.log(Level.WARNING, "Dropping malformed response", exception);
-            return;
+            return UUID.fromString(properties.getCorrelationId());
+        } catch (final IllegalArgumentException exception) {
+            return null;
         }
-        final CompletableFuture<ServerStartupResponse> responseFuture =
-            this.pendingResponses.remove(response.requestId());
-        if (responseFuture == null) {
-            this.logger.log(Level.FINE, "Dropping unmatched response " + response.requestId());
-            return;
-        }
-        responseFuture.complete(response);
     }
 
     @Override
@@ -152,7 +227,7 @@ public final class ShardsClient implements AutoCloseable {
         this.closed = true;
         this.ready = false;
         this.pendingResponses.values()
-            .forEach(pending -> pending.completeExceptionally(new IllegalStateException("Client closed")));
+            .forEach(pending -> pending.future().completeExceptionally(new IllegalStateException("Client closed")));
         this.pendingResponses.clear();
         closeQuietly();
     }
@@ -174,6 +249,22 @@ public final class ShardsClient implements AutoCloseable {
                 this.logger.log(Level.WARNING, "Failed to close the RabbitMQ connection", exception);
             } finally {
                 this.connection = null;
+            }
+        }
+    }
+
+    /**
+     * A request waiting for its answer, holding the type to parse that answer as. The type has to be
+     * carried here because the reply queue is shared by every kind of request.
+     */
+    private record Pending<RES>(Class<RES> responseType, CompletableFuture<RES> future) {
+
+        void complete(final String body, final Logger logger) {
+            try {
+                this.future.complete(GSON.fromJson(body, this.responseType));
+            } catch (final RuntimeException exception) {
+                logger.log(Level.WARNING, "Could not parse a " + this.responseType.getSimpleName(), exception);
+                this.future.completeExceptionally(exception);
             }
         }
     }
