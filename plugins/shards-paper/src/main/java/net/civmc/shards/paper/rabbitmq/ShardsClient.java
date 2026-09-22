@@ -32,6 +32,8 @@ import net.civmc.shards.api.ChunkUpdateMessage;
 import net.civmc.shards.api.MobPositionMessage;
 import net.civmc.shards.api.PlayerPositionMessage;
 import net.civmc.shards.api.ChunkStateResponse;
+import net.civmc.shards.api.NightSkipRequest;
+import net.civmc.shards.api.NightSkipResponse;
 import net.civmc.shards.api.BorderProbeResponse;
 import net.civmc.shards.api.PlayerCheckpointRequest;
 import net.civmc.shards.api.PlayerCheckpointResponse;
@@ -46,6 +48,8 @@ import net.civmc.shards.api.PlayerTransferResponse;
 import net.civmc.shards.api.ServerStartupRequest;
 import net.civmc.shards.api.ServerStartupResponse;
 import net.civmc.shards.api.ShardsRabbitMqTopology;
+import net.civmc.shards.api.SkyStateRequest;
+import net.civmc.shards.api.SkyStateResponse;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -218,7 +222,22 @@ public final class ShardsClient implements AutoCloseable {
             BorderProbeResponse.class);
     }
 
+    /**
+     * Asks what the sky should look like. Reads nothing and locks nothing, so it is safe to ask on a
+     * timer for as long as this server is up.
+     */
+    public CompletableFuture<SkyStateResponse> skyState(final SkyStateRequest request) {
+        return publish(ShardsRabbitMqTopology.SKY_STATE_QUEUE, request.requestId(), request,
+            SkyStateResponse.class);
+    }
 
+    /**
+     * Asks for the network's night to be moved on, because the players here have slept through it.
+     */
+    public CompletableFuture<NightSkipResponse> skipNight(final NightSkipRequest request) {
+        return publish(ShardsRabbitMqTopology.NIGHT_SKIP_QUEUE, request.requestId(), request,
+            NightSkipResponse.class);
+    }
 
     /**
      * Asks the shard that owns a chunk what is really in it.
