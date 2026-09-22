@@ -14,11 +14,14 @@ import net.civmc.shards.paper.border.GlassBorderRenderer;
 import net.civmc.shards.paper.border.ParticleBorderRenderer;
 import net.civmc.shards.paper.border.ShardBorder;
 import net.civmc.shards.paper.border.ShardBorderListener;
+import net.civmc.shards.paper.border.ShardRespawnListener;
 import net.civmc.shards.paper.border.TransferService;
 import net.civmc.shards.paper.config.ShardsPaperConfig;
 import net.civmc.shards.paper.playerdata.OwnedPlayers;
 import net.civmc.shards.paper.playerdata.PlayerDataListener;
 import net.civmc.shards.paper.rabbitmq.ShardsClient;
+import net.civmc.shards.paper.sky.SkyListener;
+import net.civmc.shards.paper.sky.SkySync;
 import net.civmc.shards.paper.snapshot.SnapshotVerifyCommand;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
@@ -77,7 +80,10 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         }
         getServer().getPluginManager().registerEvents(
             new ShardBorderListener(this.border, this.transfers, notices, outlook), this);
+        getServer().getPluginManager().registerEvents(
+            new ShardRespawnListener(this, this.border, this.transfers, getLogger()), this);
         getCommand("shardsnapshot").setExecutor(new SnapshotVerifyCommand());
+        startSkySync();
         startPeriodicSave();
         startBorderView(this.view);
     }
@@ -111,6 +117,27 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             case PARTICLES -> new ParticleBorderRenderer();
             case GLASS -> new GlassBorderRenderer(this);
         };
+    }
+
+    /**
+     * Keeps this shard's sky the same as everybody else's.
+     *
+     * <p>The ground either side of a border is identical, so the sky is the one thing that gives a
+     * crossing away. Each shard asks rather than being told, which means one that has just started or
+     * just reconnected is right within a single interval without the proxy tracking who is listening.</p>
+     */
+    private void startSkySync() {
+        if (this.config.skySyncSeconds() <= 0) {
+            getLogger().warning("Sky sync is off: this server runs its own clock and weather, so a crossing "
+                + "can take a player from noon into a thunderstorm");
+            return;
+        }
+        final SkySync sync = new SkySync(this, this.client, this.config.serverName(), getLogger());
+        getServer().getPluginManager().registerEvents(
+            new SkyListener(this, this.client, sync, this.config.serverName(), getLogger()), this);
+        final long ticks = this.config.skySyncSeconds() * 20L;
+        getServer().getScheduler().runTaskTimer(this, sync::poll, ticks, ticks);
+        getLogger().info("Following the network's sky, checked every " + this.config.skySyncSeconds() + "s");
     }
 
     /**
