@@ -13,13 +13,17 @@ import java.io.IOException;
 import java.net.ConnectException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import net.civmc.shards.api.BorderProbeRequest;
@@ -34,6 +38,7 @@ import net.civmc.shards.api.CargoSendResponse;
 import net.civmc.shards.api.CargoStatusRequest;
 import net.civmc.shards.api.CargoStatusResponse;
 import net.civmc.shards.api.ChunkStateRequest;
+import net.civmc.shards.api.chat.LocalChatSpeech;
 import net.civmc.shards.api.ChunkUpdateMessage;
 import net.civmc.shards.api.MobPositionMessage;
 import net.civmc.shards.api.PlayerPositionMessage;
@@ -81,6 +86,10 @@ public final class ShardsClient implements AutoCloseable {
     private final Runnable onFirstConnect;
     private final AtomicBoolean firstConnectDone = new AtomicBoolean();
     private final Map<UUID, Pending<?>> pendingResponses = new ConcurrentHashMap<>();
+    // Fanouts this client listens to, kept so that a connection rebuilt after a failed attempt comes
+    // back listening to the same ones. The driver recovers consumers on a connection it recovers;
+    // this covers the case it cannot, which is a connection that never came up in the first place
+    private final List<Runnable> subscriptions = new CopyOnWriteArrayList<>();
     private volatile boolean closed;
     private volatile boolean ready;
     private Connection connection;
@@ -129,6 +138,7 @@ public final class ShardsClient implements AutoCloseable {
             watchRecovery(this.connection);
             watchBlocking(this.connection);
             this.ready = true;
+            this.subscriptions.forEach(Runnable::run);
         } catch (final ConnectException exception) {
             this.logger.warning("Retrying RabbitMQ connection");
             Bukkit.getScheduler().runTaskLaterAsynchronously(this.plugin, this::connect, RECONNECT_DELAY_TICKS);
@@ -309,6 +319,50 @@ public final class ShardsClient implements AutoCloseable {
     }
 
     /**
+     * Listens to a fanout for as long as this client is connected.
+     *
+     * <p>Its own channel, because the driver dispatches one channel's deliveries on one thread in
+     * order: sharing the reply channel would have every announcement queue behind whatever reply was
+     * being handled, and the other way round.</p>
+     *
+     * <p>Our own announcements come back to us, a fanout going to everybody, and are dropped by the
+     * sender's name rather than by not binding - there is nothing to bind differently.</p>
+     */
+    public <T> void subscribe(final String exchange, final Class<T> type, final Function<T, String> sender,
+                              final Consumer<T> handler) {
+        final Runnable subscribe = () -> {
+            try {
+                final Channel announcements;
+                synchronized (this) {
+                    announcements = this.connection.createChannel();
+                }
+                announcements.exchangeDeclare(exchange, "fanout", false);
+                final String queue = announcements.queueDeclare().getQueue();
+                announcements.queueBind(queue, exchange, "");
+                announcements.basicConsume(queue, true, (consumerTag, delivery) -> {
+                    try {
+                        final T message = GSON.fromJson(
+                            new String(delivery.getBody(), StandardCharsets.UTF_8), type);
+                        if (message != null && !this.serverName.equals(sender.apply(message))) {
+                            handler.accept(message);
+                        }
+                    } catch (final RuntimeException exception) {
+                        this.logger.log(Level.FINE, "Dropping a malformed announcement on " + exchange,
+                            exception);
+                    }
+                }, consumerTag -> {
+                });
+            } catch (final IOException | RuntimeException exception) {
+                this.logger.log(Level.WARNING, "Could not listen on " + exchange, exception);
+            }
+        };
+        this.subscriptions.add(subscribe);
+        if (this.ready) {
+            subscribe.run();
+        }
+    }
+
+    /**
      * Sends something to everybody and does not wait to hear about it.
      *
      * <p>Nothing here can fail in a way worth reporting. The worst case for a lost announcement is a
@@ -341,6 +395,14 @@ public final class ShardsClient implements AutoCloseable {
     public void publishPlayerPositions(final PlayerPositionMessage positions) {
         announce(ShardsRabbitMqTopology.MIRROR_PLAYER_EXCHANGE, positions,
             ShardsRabbitMqTopology.MIRROR_PLAYER_TTL_MILLIS);
+    }
+
+    /**
+     * Announces what one of this shard's players has just said in local chat, to every shard at once.
+     */
+    public void publishLocalChat(final LocalChatSpeech speech) {
+        announce(ShardsRabbitMqTopology.LOCAL_CHAT_EXCHANGE, speech,
+            ShardsRabbitMqTopology.LOCAL_CHAT_TTL_MILLIS);
     }
 
     public void publishMobPositions(final MobPositionMessage positions) {

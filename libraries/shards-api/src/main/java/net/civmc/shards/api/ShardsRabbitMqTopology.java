@@ -115,6 +115,20 @@ public final class ShardsRabbitMqTopology {
     // The same two ticks, and for the same reason: a minecart's position is only ever the latest one
     public static final int MIRROR_MOB_TTL_MILLIS = 100;
 
+    /**
+     * Where a shard announces what its players have just said in local chat.
+     *
+     * <p>A fanout like the rest of the mirror, and for the same reason: who can hear a sentence
+     * depends on where everybody is standing at that moment, which the speaker's shard does not
+     * know about anybody but its own. Every shard gets every line and drops the ones spoken out of
+     * earshot of all of its players, which it can answer without asking anybody.</p>
+     */
+    public static final String LOCAL_CHAT_EXCHANGE = "shards.chat.local";
+    // Long enough to survive a hiccup, short enough that nobody is answered a sentence from before
+    // they walked up. A late line of chat is worse than a lost one: it reads as somebody talking to
+    // themselves
+    public static final int LOCAL_CHAT_TTL_MILLIS = 5_000;
+
     public static final String REPLY_QUEUE_PREFIX = "shards.replies.";
 
     /**
