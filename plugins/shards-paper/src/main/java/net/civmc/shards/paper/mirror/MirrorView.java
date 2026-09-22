@@ -79,6 +79,10 @@ public final class MirrorView implements Listener {
     // the same ground, and it is the same answer for all of them
     private final Map<ChunkKey, Mirrored> mirrored = new ConcurrentHashMap<>();
     private final Set<ChunkKey> inFlight = ConcurrentHashMap.newKeySet();
+    // Chunks a neighbour announced a change to while we were part-way through reading them. The read
+    // already in flight was taken before that change, so installing its answer would throw the
+    // correction away and leave the block missing until the backstop. Marked here, and read again
+    private final Set<ChunkKey> changedWhileFetching = ConcurrentHashMap.newKeySet();
     // Which chunks each player has been sent, so a diff is sent once rather than every pass. Dropped
     // when a chunk leaves their range, because their client discards it and will be sent this
     // server's own version again if they come back
@@ -138,7 +142,8 @@ public final class MirrorView implements Listener {
     private void show(final Player viewer, final ChunkKey key, final ShardPoint foreignBlock,
                       final List<ShardPoint> askingWhoOwns) {
         final Mirrored current = this.mirrored.get(key);
-        if (current == null || System.nanoTime() - current.fetchedAtNanos() > FRESH_FOR_NANOS) {
+        if (current == null || current.stale()
+            || System.nanoTime() - current.fetchedAtNanos() > FRESH_FOR_NANOS) {
             fetch(key, foreignBlock, askingWhoOwns);
         }
         if (current == null) {
@@ -172,22 +177,51 @@ public final class MirrorView implements Listener {
         if (!this.inFlight.add(key)) {
             return;
         }
+        // Anything announced from here on was changed after this read was asked for, so it may not be
+        // in the answer. Cleared here and never earlier: an announcement that arrived before the
+        // request is already in the neighbour's snapshot, because the snapshot is taken afterwards
+        this.changedWhileFetching.remove(key);
         this.client.chunkState(owner.get().shardName(),
                 ChunkStateRequest.create(this.serverName, key.world(), key.x(), key.z()))
             .whenComplete((response, error) -> accept(key, response, error));
     }
 
     private void accept(final ChunkKey key, final ChunkStateResponse response, final Throwable error) {
+        if (error != null || response == null || response.failed()) {
+            // Left showing our own copy. A neighbour that cannot answer is not a reason to draw a
+            // hole in the world, and the fetch is retried on the next pass
+            this.logger.log(Level.FINE, "Could not read " + key + " from its owner", error);
+            this.inFlight.remove(key);
+            return;
+        }
+        // Held until the chunk is installed, not merely until the answer arrives. The difference is
+        // worked out off the main thread and then waits for a tick, and a chunk that stopped being in
+        // flight before that is asked for again by the very next pass: a second whole read of a
+        // neighbour's chunk, thrown away, which can also land an older answer on top of a newer one
         try {
-            if (error != null || response == null || response.failed()) {
-                // Left showing our own copy. A neighbour that cannot answer is not a reason to draw a
-                // hole in the world, and the fetch is retried on the next pass
-                this.logger.log(Level.FINE, "Could not read " + key + " from its owner", error);
+            final ChunkState state = ChunkStateCodec.fromBytes(Base64.getDecoder().decode(response.state()));
+            final String publisherId = response.publisherId();
+            final long revision = response.revision();
+            diff(key, state).whenComplete((blocks, failure) -> Bukkit.getScheduler().runTask(this.plugin,
+                () -> installed(key, blocks, failure, publisherId, revision)));
+        } catch (final RuntimeException unreadable) {
+            this.logger.log(Level.WARNING, "Could not read " + key + " as its owner sent it", unreadable);
+            this.inFlight.remove(key);
+        }
+    }
+
+    /**
+     * The end of a fetch, whichever way it went, and the only place a chunk stops being in flight once
+     * its answer has arrived. Main thread.
+     */
+    private void installed(final ChunkKey key, final Map<Position, BlockData> blocks,
+                           final Throwable failure, final String publisherId, final long revision) {
+        try {
+            if (failure != null) {
+                this.logger.log(Level.FINE, "Could not compare " + key + " with our own copy", failure);
                 return;
             }
-            final ChunkState state = ChunkStateCodec.fromBytes(Base64.getDecoder().decode(response.state()));
-            diff(key, state).thenAccept(blocks -> Bukkit.getScheduler().runTask(this.plugin,
-                () -> install(key, blocks)));
+            install(key, blocks, publisherId, revision);
         } finally {
             this.inFlight.remove(key);
         }
@@ -203,8 +237,18 @@ public final class MirrorView implements Listener {
      *
      * <p>Main thread: it reads this server's own world, and it decides who has to be told again.</p>
      */
-    private void install(final ChunkKey key, final Map<Position, BlockData> blocks) {
+    private void install(final ChunkKey key, final Map<Position, BlockData> blocks,
+                         final String publisherId, final long revision) {
         final Mirrored previous = this.mirrored.get(key);
+        // Announced while this was being read, so of the two pictures this is the older one
+        final boolean overtaken = this.changedWhileFetching.remove(key);
+        if (overtaken && previous != null) {
+            // Keep the corrected picture and read again. Installing this instead is the one order that
+            // shows a block being taken back: the change appears, disappears, and returns a second
+            // later when the next read lands
+            this.mirrored.put(key, previous.readAgain());
+            return;
+        }
         final Map<Position, BlockData> send = new HashMap<>(blocks);
         final World world = Bukkit.getWorld(key.world());
         if (previous != null && world != null) {
@@ -215,7 +259,8 @@ public final class MirrorView implements Listener {
                 }
             }
         }
-        this.mirrored.put(key, new Mirrored(blocks, send, System.nanoTime()));
+        this.mirrored.put(key, new Mirrored(blocks, send, System.nanoTime(), overtaken, publisherId,
+            revision));
         if (previous != null && previous.blocks().equals(blocks)) {
             // Nothing has changed over there, so nobody needs telling again
             return;
@@ -326,9 +371,29 @@ public final class MirrorView implements Listener {
      */
     public void applyUpdate(final ChunkUpdateMessage update) {
         final ChunkKey key = new ChunkKey(update.world(), update.chunkX(), update.chunkZ());
+        if (this.inFlight.contains(key)) {
+            // This chunk is being read right now, and the read was asked for before this change, so
+            // the answer on its way may not have it. Recorded whether or not there is a picture to
+            // correct below: a first fetch has nothing to correct and is the widest window of the lot,
+            // the one that arriving on a shard opens for every chunk along the border at once
+            this.changedWhileFetching.add(key);
+        }
         final Mirrored current = this.mirrored.get(key);
         if (current == null) {
             return;
+        }
+        final boolean sameNumbering = update.publisherId().equals(current.publisherId());
+        if (sameNumbering && update.revision() <= current.revision()) {
+            // Already accounted for. The broker can hand the same message over twice, and applying an
+            // old one again would put back a block that has since changed
+            return;
+        }
+        // Either a number was skipped, or the owner has restarted and is numbering from the start
+        // again. What has arrived is still the most recent thing we know, so it is applied - but
+        // something between here and the last one is missing, and only a full read can say what
+        final boolean missedOne = !sameNumbering || update.revision() != current.revision() + 1L;
+        if (missedOne) {
+            this.metrics.missedAnnouncement();
         }
         final World world = Bukkit.getWorld(update.world());
         if (world == null) {
@@ -351,7 +416,8 @@ public final class MirrorView implements Listener {
             }
         }
         // Keeps the fetch time, because nothing has been re-read - only corrected
-        this.mirrored.put(key, new Mirrored(blocks, blocks, current.fetchedAtNanos()));
+        this.mirrored.put(key, new Mirrored(blocks, blocks, current.fetchedAtNanos(),
+            current.stale() || missedOne, update.publisherId(), update.revision()));
         for (final Player viewer : Bukkit.getOnlinePlayers()) {
             final Set<ChunkKey> alreadyShown = this.shown.get(viewer.getUniqueId());
             if (alreadyShown != null && alreadyShown.contains(key)) {
@@ -386,8 +452,19 @@ public final class MirrorView implements Listener {
      * @param blocks what the owner has where we have something else
      * @param send the same, plus anything that was in the last picture and is not in this one, put
      *     back to this server's own copy so a demolished building does not stand forever
+     * @param stale this picture is known to be behind - a change was announced while the chunk was
+     *     being read, or an announcement was missed - so it is shown, but the chunk is read again on
+     *     the next pass rather than waiting out the backstop
+     * @param publisherId which run of the owning server numbered the announcements this picture counts
+     * @param revision the last announcement about this chunk that is accounted for here. See
+     *     {@link ChunkRevisions}
      */
     private record Mirrored(Map<Position, BlockData> blocks, Map<Position, BlockData> send,
-                            long fetchedAtNanos) {
+                            long fetchedAtNanos, boolean stale, String publisherId, long revision) {
+
+        Mirrored readAgain() {
+            return new Mirrored(this.blocks(), this.send(), this.fetchedAtNanos(), true,
+                this.publisherId(), this.revision());
+        }
     }
 }

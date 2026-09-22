@@ -17,8 +17,12 @@ import net.civmc.shards.paper.border.ShardBorderListener;
 import net.civmc.shards.paper.border.ShardRespawnListener;
 import net.civmc.shards.paper.border.TransferService;
 import net.civmc.shards.paper.config.ShardsPaperConfig;
+import net.civmc.shards.paper.mirror.ChunkRevisions;
 import net.civmc.shards.paper.mirror.ChunkStateProvider;
 import net.civmc.shards.paper.mirror.MirrorMetrics;
+import net.civmc.shards.paper.mirror.MirrorPlayerPublisher;
+import net.civmc.shards.paper.mirror.MirrorPlayerView;
+import net.civmc.shards.paper.mirror.MirrorPlayers;
 import net.civmc.shards.paper.mirror.MirrorRepairListener;
 import net.civmc.shards.paper.mirror.MirrorUpdatePublisher;
 import net.civmc.shards.paper.mirror.MirrorView;
@@ -34,6 +38,7 @@ import net.civmc.shards.paper.snapshot.SnapshotVerifyCommand;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
 public final class ShardsPaperPlugin extends JavaPlugin {
@@ -181,14 +186,19 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             return;
         }
         final MirrorMetrics metrics = new MirrorMetrics();
+        // Shared by the two halves that have to agree on one count: the publisher that numbers an
+        // announcement, and the provider that says which number a snapshot was taken at
+        final ChunkRevisions revisions = new ChunkRevisions();
+        final MirrorPlayers players = startPlayerMirror();
         // As far as the client renders, which is what has to look right. The neighbour's own view
         // distance does not come into it - it is this server's players who are looking
         final MirrorView mirror = new MirrorView(this, this.border, outlook, this.client,
             this.config.serverName(), getLogger(), getServer().getViewDistance(), metrics);
         this.mirrorServer = new ShardsServer(this.config.connectionFactory(), this.config.serverName(), this,
-            getLogger(), new ChunkStateProvider(this.border), metrics,
-            // Announcements arrive on a broker thread and this reads the world and sends to players
-            update -> getServer().getScheduler().runTask(this, () -> mirror.applyUpdate(update)));
+            getLogger(), new ChunkStateProvider(this.border, revisions), metrics,
+            // Announcements arrive on a broker thread and these read the world and send to players
+            update -> getServer().getScheduler().runTask(this, () -> mirror.applyUpdate(update)),
+            positions -> getServer().getScheduler().runTask(this, () -> players.apply(positions)));
         this.mirrorServer.start();
         getServer().getPluginManager().registerEvents(mirror, this);
         // A refused placement makes the client correct itself to what is really there, which for
@@ -198,9 +208,16 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         // Tells the other shards what has just changed here, so none of them has to re-read a chunk to
         // find out. Flushed once a tick: a block changed several times in one tick is sent once
         final MirrorUpdatePublisher publisher = new MirrorUpdatePublisher(this.border, this.client,
-            this.config.serverName(), getLogger());
+            this.config.serverName(), getLogger(), revisions);
         getServer().getPluginManager().registerEvents(publisher, this);
         getServer().getScheduler().runTaskTimer(this, publisher::flush, 1L, 1L);
+
+        // Where this shard's players are, every tick, for the shards that can see that ground. Sent
+        // whether or not this server can show anybody: a neighbour may be able to even if we cannot
+        final MirrorPlayerPublisher playerPublisher = new MirrorPlayerPublisher(this.border, this.client,
+            this.config.serverName());
+        getServer().getScheduler().runTaskTimer(this, playerPublisher::publish, 1L, 1L);
+        getServer().getScheduler().runTaskTimer(this, players::expire, 20L, 20L);
         getServer().getScheduler().runTaskTimer(this, () -> {
             for (final Player player : Bukkit.getOnlinePlayers()) {
                 mirror.update(player);
@@ -211,6 +228,37 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         // this survives a busy border
         getServer().getScheduler().runTaskTimerAsynchronously(this, () -> metrics.report(getLogger()),
             MIRROR_REPORT_TICKS, MIRROR_REPORT_TICKS);
+    }
+
+    /**
+     * Shows the players on other shards, if there is anything here that can.
+     *
+     * <p>Showing a player who is not really here is the one thing the mirror cannot do over the public
+     * API, so it needs PacketEvents - which is a soft dependency, and might not be installed, or might
+     * be installed broken. Both have to end with this server running everything else rather than not
+     * starting.</p>
+     *
+     * <p>Hence the care: the class that uses the library is never named until the library is known to
+     * have loaded, and the construction is guarded against {@link NoClassDefFoundError} as well as
+     * ordinary failure. A half-installed library throws that at the point of first use rather than at
+     * load, which is how this took the border, the transfers and the sky down with it.</p>
+     */
+    private MirrorPlayers startPlayerMirror() {
+        final Plugin packetEvents = getServer().getPluginManager().getPlugin("packetevents");
+        if (packetEvents == null || !packetEvents.isEnabled()) {
+            getLogger().info("PacketEvents is not installed, so players on other shards will not be shown. "
+                + "Everything else about the mirror works without it");
+            return MirrorPlayers.NONE;
+        }
+        try {
+            final MirrorPlayerView view = new MirrorPlayerView();
+            getServer().getPluginManager().registerEvents(view, this);
+            return view;
+        } catch (final RuntimeException | LinkageError exception) {
+            getLogger().log(Level.SEVERE, "PacketEvents is installed but could not be used, so players on "
+                + "other shards will not be shown. Everything else about the mirror is unaffected", exception);
+            return MirrorPlayers.NONE;
+        }
     }
 
     /**

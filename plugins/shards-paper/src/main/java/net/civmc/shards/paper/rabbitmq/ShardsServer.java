@@ -12,18 +12,21 @@ import java.io.IOException;
 import java.net.ConnectException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import net.civmc.shards.api.ChunkStateRequest;
 import net.civmc.shards.api.ChunkStateResponse;
 import net.civmc.shards.api.ChunkUpdateMessage;
+import net.civmc.shards.api.PlayerPositionMessage;
 import net.civmc.shards.api.ShardsRabbitMqTopology;
 import net.civmc.shards.api.mirror.ChunkStateCodec;
 import net.civmc.shards.paper.mirror.ChunkStateProvider;
@@ -61,13 +64,22 @@ public final class ShardsServer implements AutoCloseable {
     private final ChunkStateProvider chunks;
     private final MirrorMetrics metrics;
     private final Consumer<ChunkUpdateMessage> updates;
+    private final Consumer<PlayerPositionMessage> positions;
     private volatile boolean closed;
     private Connection connection;
-    private Channel channel;
+    // One per consumer. The driver dispatches a channel's deliveries on a single thread, in order, so
+    // everything sharing a channel queues behind whichever delivery is slowest - and a chunk read is
+    // by far the slowest thing here. Sharing one channel meant a shard that was serving chunks stopped
+    // receiving announcements, which expire in seconds, so neighbours silently went stale until
+    // something forced a re-read. The proxy's consumer learned this first and says so in its own
+    // comment; this is the same lesson, one layer along
+    private final List<Channel> channels = new ArrayList<>();
+    private Channel chunkChannel;
 
     public ShardsServer(final ConnectionFactory connectionFactory, final String serverName,
                         final JavaPlugin plugin, final Logger logger, final ChunkStateProvider chunks,
-                        final MirrorMetrics metrics, final Consumer<ChunkUpdateMessage> updates) {
+                        final MirrorMetrics metrics, final Consumer<ChunkUpdateMessage> updates,
+                        final Consumer<PlayerPositionMessage> positions) {
         this.connectionFactory = connectionFactory;
         this.serverName = serverName;
         this.plugin = plugin;
@@ -75,6 +87,7 @@ public final class ShardsServer implements AutoCloseable {
         this.chunks = chunks;
         this.metrics = metrics;
         this.updates = updates;
+        this.positions = positions;
     }
 
     public boolean start() {
@@ -87,21 +100,24 @@ public final class ShardsServer implements AutoCloseable {
         }
         try {
             this.connection = this.connectionFactory.newConnection("shards-paper-server");
-            this.channel = this.connection.createChannel();
-            this.channel.basicQos(PREFETCH_COUNT);
+            this.chunkChannel = newChannel();
+            this.chunkChannel.basicQos(PREFETCH_COUNT);
             final Map<String, Object> arguments = new HashMap<>();
             arguments.put("x-message-ttl", ShardsRabbitMqTopology.MIRROR_REQUEST_TTL_MILLIS);
             // Durable and not exclusive, like every other request queue here: RabbitMQ refuses a
             // transient non-exclusive queue at the connection level, which costs the whole connection
             // rather than the one declare
-            this.channel.queueDeclare(ShardsRabbitMqTopology.mirrorQueue(this.serverName),
+            this.chunkChannel.queueDeclare(ShardsRabbitMqTopology.mirrorQueue(this.serverName),
                 ShardsRabbitMqTopology.REQUEST_QUEUE_DURABLE, false, false, arguments);
             final DeliverCallback deliverCallback = (consumerTag, delivery) -> handleDelivery(
                 delivery.getBody(), delivery.getProperties(), delivery.getEnvelope().getDeliveryTag());
-            this.channel.basicConsume(ShardsRabbitMqTopology.mirrorQueue(this.serverName), false,
+            this.chunkChannel.basicConsume(ShardsRabbitMqTopology.mirrorQueue(this.serverName), false,
                 deliverCallback, consumerTag -> {
                 });
-            consumeUpdates();
+            consumeAnnouncements(ShardsRabbitMqTopology.MIRROR_UPDATE_EXCHANGE, ChunkUpdateMessage.class,
+                ChunkUpdateMessage::serverName, this.updates);
+            consumeAnnouncements(ShardsRabbitMqTopology.MIRROR_PLAYER_EXCHANGE, PlayerPositionMessage.class,
+                PlayerPositionMessage::serverName, this.positions);
             this.logger.info("Answering chunk requests from other shards on "
                 + ShardsRabbitMqTopology.mirrorQueue(this.serverName));
             return true;
@@ -125,74 +141,107 @@ public final class ShardsServer implements AutoCloseable {
      * it - which is what we want, since an announcement held for a server that is not running would
      * arrive after that server had already re-read the chunk.</p>
      */
-    private void consumeUpdates() throws IOException {
-        this.channel.exchangeDeclare(ShardsRabbitMqTopology.MIRROR_UPDATE_EXCHANGE, "fanout", false);
-        final String queue = this.channel.queueDeclare().getQueue();
-        this.channel.queueBind(queue, ShardsRabbitMqTopology.MIRROR_UPDATE_EXCHANGE, "");
-        this.channel.basicConsume(queue, true, (consumerTag, delivery) -> {
+    private <T> void consumeAnnouncements(final String exchange, final Class<T> type,
+                                          final Function<T, String> sender, final Consumer<T> handler)
+        throws IOException {
+        // Its own channel, so an announcement is never queued behind a chunk read
+        final Channel announcements = newChannel();
+        announcements.exchangeDeclare(exchange, "fanout", false);
+        final String queue = announcements.queueDeclare().getQueue();
+        announcements.queueBind(queue, exchange, "");
+        announcements.basicConsume(queue, true, (consumerTag, delivery) -> {
             try {
-                final ChunkUpdateMessage update = GSON.fromJson(
-                    new String(delivery.getBody(), StandardCharsets.UTF_8), ChunkUpdateMessage.class);
-                if (update != null && !update.serverName().equals(this.serverName)) {
+                final T message = GSON.fromJson(new String(delivery.getBody(), StandardCharsets.UTF_8), type);
+                if (message != null && !sender.apply(message).equals(this.serverName)) {
                     // Our own announcements come back to us, because a fanout goes to everybody
-                    this.updates.accept(update);
+                    handler.accept(message);
                 }
             } catch (final RuntimeException exception) {
-                this.logger.log(Level.FINE, "Dropping a malformed mirror update", exception);
+                this.logger.log(Level.FINE, "Dropping a malformed announcement on " + exchange, exception);
             }
         }, consumerTag -> {
         });
     }
 
-    private void handleDelivery(final byte[] body, final AMQP.BasicProperties properties, final long deliveryTag)
-        throws IOException {
-        ChunkStateResponse response = null;
+    private void handleDelivery(final byte[] body, final AMQP.BasicProperties properties,
+                                final long deliveryTag) {
         try {
-            final ChunkStateRequest request = GSON.fromJson(new String(body, StandardCharsets.UTF_8),
-                ChunkStateRequest.class);
-            response = answer(request);
+            answer(GSON.fromJson(new String(body, StandardCharsets.UTF_8), ChunkStateRequest.class),
+                properties, deliveryTag);
         } catch (final RuntimeException exception) {
             // Anything escaping here would leave the delivery unacked and redelivered forever, and the
             // asker waiting out a timeout with nothing saying why
-            this.logger.log(Level.WARNING, "Could not answer a chunk request", exception);
+            this.logger.log(Level.WARNING, "Could not read a chunk request", exception);
             final UUID requestId = parseCorrelationId(properties);
-            if (requestId != null) {
-                response = ChunkStateResponse.error(requestId, "Request failed");
-            }
+            finish(properties, requestId == null ? null : ChunkStateResponse.error(requestId, "Request failed"),
+                deliveryTag);
         }
-        if (response != null) {
-            publish(properties, response);
-        }
-        this.channel.basicAck(deliveryTag, false);
     }
 
-    private ChunkStateResponse answer(final ChunkStateRequest request) {
+    /**
+     * Reads a chunk and replies when it is ready, without holding on to the delivery thread.
+     *
+     * <p>Waiting here would serialise every chunk this shard serves behind the one before it - a band
+     * of seventy chunks at ninety milliseconds each is six seconds of a neighbour's border filling in
+     * one chunk at a time. The read is already asynchronous; this just stops undoing that.</p>
+     */
+    private void answer(final ChunkStateRequest request, final AMQP.BasicProperties properties,
+                        final long deliveryTag) {
+        this.chunks.read(request.world(), request.chunkX(), request.chunkZ())
+            .orTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .whenComplete((read, error) -> {
+                ChunkStateResponse response;
+                if (error != null) {
+                    // Not worth shouting about: a neighbour asking about a chunk this shard owns no
+                    // part of is the ordinary answer to a border probe a moment out of date
+                    this.logger.log(Level.FINE, "Refused a chunk request", error);
+                    response = ChunkStateResponse.error(request.requestId(), "Could not read that chunk");
+                } else {
+                    try {
+                        final long encodeStartedAt = System.nanoTime();
+                        final byte[] encoded = ChunkStateCodec.toBytes(read.state());
+                        // Three parts, because they are not the same thing: waiting for a chunk is
+                        // latency spent idle, while building and encoding is work actually done. One
+                        // figure made a mirror that is merely slow to fill look like an expensive one
+                        this.metrics.served(read.waitNanos(), read.buildNanos(),
+                            System.nanoTime() - encodeStartedAt, encoded.length);
+                        response = ChunkStateResponse.of(request.requestId(), request.world(),
+                            request.chunkX(), request.chunkZ(),
+                            Base64.getEncoder().encodeToString(encoded), read.publisherId(),
+                            read.revision());
+                    } catch (final RuntimeException exception) {
+                        this.logger.log(Level.WARNING, "Could not encode a chunk", exception);
+                        response = ChunkStateResponse.error(request.requestId(), "Could not encode that chunk");
+                    }
+                }
+                finish(properties, response, deliveryTag);
+            });
+    }
+
+    /**
+     * Replies and acknowledges, on whichever thread the read finished on.
+     *
+     * <p>Both under the channel's own lock: a {@link Channel} is not safe to use from two threads, and
+     * several reads can now finish at once.</p>
+     */
+    private void finish(final AMQP.BasicProperties properties, final ChunkStateResponse response,
+                        final long deliveryTag) {
         try {
-            final ChunkStateProvider.ChunkRead read = this.chunks
-                .read(request.world(), request.chunkX(), request.chunkZ())
-                .get(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            final long encodeStartedAt = System.nanoTime();
-            final byte[] encoded = ChunkStateCodec.toBytes(read.state());
-            // Reported in three parts, because they are not the same thing at all: waiting for a chunk
-            // is latency the server spends idle, while building and encoding is work it actually does.
-            // A single figure made a mirror that is merely slow to fill look like one that is expensive
-            this.metrics.served(read.waitNanos(), read.buildNanos(), System.nanoTime() - encodeStartedAt,
-                encoded.length);
-            return ChunkStateResponse.of(request.requestId(), request.world(), request.chunkX(),
-                request.chunkZ(), Base64.getEncoder().encodeToString(encoded));
-        } catch (final InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            return ChunkStateResponse.error(request.requestId(), "Interrupted while reading the chunk");
-        } catch (final ExecutionException | TimeoutException | RuntimeException exception) {
-            // Not an error worth shouting about: a neighbour asking about a chunk this shard owns no
-            // part of is the ordinary answer to a border probe that arrived a moment out of date
-            this.logger.log(Level.FINE, "Refused a chunk request", exception);
-            return ChunkStateResponse.error(request.requestId(), "Could not read that chunk");
+            synchronized (this.chunkChannel) {
+                publish(properties, response);
+                this.chunkChannel.basicAck(deliveryTag, false);
+            }
+        } catch (final IOException | RuntimeException exception) {
+            // An unacked delivery is redelivered forever, so this is worth seeing
+            this.logger.log(Level.WARNING, "Could not answer a chunk request", exception);
         }
     }
 
     private void publish(final AMQP.BasicProperties requestProperties, final ChunkStateResponse response)
         throws IOException {
+        if (response == null) {
+            return;
+        }
         if (requestProperties == null || requestProperties.getReplyTo() == null
             || requestProperties.getReplyTo().isBlank()) {
             this.logger.warning("Dropping a chunk answer because no reply queue was given");
@@ -203,10 +252,14 @@ public final class ShardsServer implements AutoCloseable {
             .correlationId(requestProperties.getCorrelationId())
             .deliveryMode(1)
             .build();
-        synchronized (this) {
-            this.channel.basicPublish("", requestProperties.getReplyTo(), responseProperties,
-                GSON.toJson(response).getBytes(StandardCharsets.UTF_8));
-        }
+        this.chunkChannel.basicPublish("", requestProperties.getReplyTo(), responseProperties,
+            GSON.toJson(response).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private Channel newChannel() throws IOException {
+        final Channel created = this.connection.createChannel();
+        this.channels.add(created);
+        return created;
     }
 
     private static UUID parseCorrelationId(final AMQP.BasicProperties properties) {
@@ -227,14 +280,15 @@ public final class ShardsServer implements AutoCloseable {
     }
 
     private void closeQuietly() {
-        if (this.channel != null) {
+        for (final Channel open : this.channels) {
             try {
-                this.channel.close();
+                open.close();
             } catch (final IOException | TimeoutException | AlreadyClosedException exception) {
-                this.logger.log(Level.FINE, "Failed to close the Shards server channel", exception);
+                this.logger.log(Level.FINE, "Failed to close a Shards server channel", exception);
             }
-            this.channel = null;
         }
+        this.channels.clear();
+        this.chunkChannel = null;
         if (this.connection != null) {
             try {
                 this.connection.close();
