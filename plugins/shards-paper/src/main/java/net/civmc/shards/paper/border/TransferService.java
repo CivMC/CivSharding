@@ -43,13 +43,14 @@ public final class TransferService {
     private final String serverName;
     private final Component failureMessage;
     private final BorderNotices notices;
+    private final BorderView view;
     private final Set<UUID> inTransit = ConcurrentHashMap.newKeySet();
     // What was taken out from under each player, so it can be put back if the handover never starts
     private final Map<UUID, VehicleSnapshot> removedVehicles = new ConcurrentHashMap<>();
 
     public TransferService(final JavaPlugin plugin, final ShardsClient client, final OwnedPlayers owned,
                            final Logger logger, final String serverName, final String failureMessage,
-                           final BorderNotices notices) {
+                           final BorderNotices notices, final BorderView view) {
         this.plugin = plugin;
         this.client = client;
         this.owned = owned;
@@ -57,6 +58,7 @@ public final class TransferService {
         this.serverName = serverName;
         this.failureMessage = Component.text(failureMessage);
         this.notices = notices;
+        this.view = view;
     }
 
     public boolean isInTransit(final UUID playerUuid) {
@@ -74,6 +76,7 @@ public final class TransferService {
         this.inTransit.remove(playerUuid);
         this.removedVehicles.remove(playerUuid);
         this.notices.forget(playerUuid);
+        this.view.forget(playerUuid);
     }
 
     /**
@@ -154,6 +157,11 @@ public final class TransferService {
             this.inTransit.remove(playerUuid);
             return false;
         }
+
+        // What they were being shown belongs to the shard they are leaving, and the faces of it were
+        // worked out for a block on this side. Particles expire on their own, but the outline behind
+        // them would otherwise be handed to the arriving shard as though it were still true
+        this.view.forget(playerUuid);
 
         // Taken out of this world before the handover is sent, not after it is confirmed. Between
         // sending and being told it worked the destination may already have rebuilt it, so removing
