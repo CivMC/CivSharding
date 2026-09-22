@@ -49,6 +49,8 @@ import net.civmc.shards.paper.playerdata.OwnedPlayers;
 import net.civmc.shards.paper.playerdata.PlayerDataListener;
 import net.civmc.shards.paper.rabbitmq.ShardsClient;
 import net.civmc.shards.paper.rabbitmq.ShardsServer;
+import net.civmc.shards.paper.sky.SkyListener;
+import net.civmc.shards.paper.sky.SkySync;
 import net.civmc.shards.paper.snapshot.SnapshotVerifyCommand;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
