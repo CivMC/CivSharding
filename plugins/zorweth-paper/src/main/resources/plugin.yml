@@ -3,8 +3,8 @@ version: 1.0.0
 main: net.civmc.zorweth.ZorwethPlugin
 author: Okx
 api-version: 1.21.11
-depend: [CivModCore, WorldEdit, Citadel, Bastion, NameLayer, LuckPerms]
-softdepend: [ExilePearl, BreweryX, CombatTagPlus]
+depend: [CivModCore, WorldEdit, Citadel, Bastion, NameLayer, LuckPerms, Shards]
+softdepend: [ExilePearl, BreweryX]
 commands:
   pioneer:
     description: Transfer to Zorweth from the main server

@@ -5,6 +5,7 @@ plugins {
 version = "1.0.0"
 
 dependencies {
+    compileOnly(project(":plugins:shards-paper"))
     compileOnly(libs.paper.api)
     compileOnly(project(":plugins:civmodcore-paper"))
     compileOnly(project(":plugins:citadel-paper"))
