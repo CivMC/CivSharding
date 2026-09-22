@@ -19,6 +19,14 @@ import net.civmc.shards.velocity.config.ShardsConfig;
 import com.velocitypowered.api.command.CommandManager;
 import net.civmc.shards.velocity.placement.ShardConnectionListener;
 import net.civmc.shards.velocity.placement.ShardPlacementService;
+import net.civmc.shards.velocity.playerdata.InFlightTransfers;
+import net.civmc.shards.velocity.playerdata.PlayerDataService;
+import net.civmc.shards.velocity.playerdata.ShardLockExpiry;
+import net.civmc.shards.velocity.rabbitmq.PlayerCheckpointHandler;
+import net.civmc.shards.velocity.rabbitmq.PlayerClaimHandler;
+import net.civmc.shards.velocity.rabbitmq.PlayerReleaseHandler;
+import net.civmc.shards.velocity.rabbitmq.PlayerSaveHandler;
+import net.civmc.shards.velocity.rabbitmq.ServerStartupHandler;
 import net.civmc.shards.velocity.rabbitmq.ShardsRequestConsumer;
 import org.slf4j.Logger;
 
@@ -39,6 +47,7 @@ public final class ShardsVelocityPlugin {
     private final Path dataDirectory;
     private final Injector injector;
     private ShardPlacementService shardPlacementService;
+    private PlayerDataService playerDataService;
     private ShardsRequestConsumer requestConsumer;
 
     @Inject
@@ -50,8 +59,25 @@ public final class ShardsVelocityPlugin {
         this.injector = injector;
     }
 
+    @Subscribe
+    public void onProxyInitialization(final ProxyInitializeEvent event) {
+        final ShardsConfig shardsConfig = ShardsConfig.load(this.dataDirectory);
+
+        // Child of Velocity's injector for this plugin, which already provides ProxyServer, PluginContainer, Logger
+        final Injector shardsInjector = this.injector.createChildInjector(new ShardsModule(shardsConfig));
+
+        this.proxyServer.getEventManager().register(this, shardsInjector.getInstance(ShardConnectionListener.class));
+
+        this.shardPlacementService = shardsInjector.getInstance(ShardPlacementService.class);
+        this.playerDataService = shardsInjector.getInstance(PlayerDataService.class);
 
 
-
+        // Shared by the two handlers that between them make a crossing tellable from a login: the
+        // transfer writes the record and the claim that follows reads it
+        final InFlightTransfers inFlightTransfers = new InFlightTransfers();
+        if (!this.requestConsumer.start()) {
+            this.logger.warn("Shards could not start its request consumer; no server can reach its player data");
+        }
+    }
 
 }

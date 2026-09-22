@@ -10,6 +10,7 @@ import net.civmc.shards.api.ShardsRabbitMqTopology;
 import net.civmc.shards.paper.border.ShardBorder;
 import net.civmc.shards.paper.config.ShardsPaperConfig;
 import net.civmc.shards.paper.rabbitmq.ShardsClient;
+import net.civmc.shards.paper.snapshot.SnapshotVerifyCommand;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
