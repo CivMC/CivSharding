@@ -42,18 +42,21 @@ public final class TransferService {
     private final Logger logger;
     private final String serverName;
     private final Component failureMessage;
+    private final BorderNotices notices;
     private final Set<UUID> inTransit = ConcurrentHashMap.newKeySet();
     // What was taken out from under each player, so it can be put back if the handover never starts
     private final Map<UUID, VehicleSnapshot> removedVehicles = new ConcurrentHashMap<>();
 
     public TransferService(final JavaPlugin plugin, final ShardsClient client, final OwnedPlayers owned,
-                           final Logger logger, final String serverName, final String failureMessage) {
+                           final Logger logger, final String serverName, final String failureMessage,
+                           final BorderNotices notices) {
         this.plugin = plugin;
         this.client = client;
         this.owned = owned;
         this.logger = logger;
         this.serverName = serverName;
         this.failureMessage = Component.text(failureMessage);
+        this.notices = notices;
     }
 
     public boolean isInTransit(final UUID playerUuid) {
@@ -70,6 +73,7 @@ public final class TransferService {
     public void forget(final UUID playerUuid) {
         this.inTransit.remove(playerUuid);
         this.removedVehicles.remove(playerUuid);
+        this.notices.forget(playerUuid);
     }
 
     /**
@@ -135,8 +139,11 @@ public final class TransferService {
 
         final PlayerTransferRequest request;
         final VehicleSnapshot vehicle;
+        final long capturedAt;
+        final long startedAt = System.nanoTime();
         try {
             final PlayerSnapshot snapshot = PlayerSnapshots.captureForTransfer(player);
+            capturedAt = System.nanoTime();
             vehicle = snapshot.vehicle();
             final String payload = Base64.getEncoder().encodeToString(PlayerSnapshotCodec.toBytes(snapshot));
             request = shardName == null
@@ -164,7 +171,12 @@ public final class TransferService {
             // Back onto the main thread: the failure path kicks the player, and the transit set is
             // read by move handling that runs there
             .whenComplete((response, error) -> Bukkit.getScheduler().runTask(
-                this.plugin, () -> complete(playerUuid, response, error)));
+                this.plugin, () -> {
+                    this.logger.info(String.format(
+                        "Transfer of %s: captured in %dms, proxy answered after %dms",
+                        playerUuid, millis(startedAt, capturedAt), millis(capturedAt, System.nanoTime())));
+                    complete(playerUuid, response, error);
+                }));
         return true;
     }
 
@@ -185,14 +197,27 @@ public final class TransferService {
             return;
         }
         this.inTransit.remove(playerUuid);
-        if (response.status() == TransferStatus.NO_DESTINATION) {
-            // Ground owned by nobody. A valid configuration, so the edge is a wall: they stay, still
-            // owned here, and nothing was written
+        putVehicleBack(playerUuid, player);
+
+        // Every one of these is refused before anything is written, so the player is untouched and
+        // still owned here. The edge simply does not let them through this time - ground owned by
+        // nobody, a shard that is not answering, or a save the proxy would not make
+        if (response.status() == TransferStatus.NO_DESTINATION
+            || response.status() == TransferStatus.DESTINATION_UNAVAILABLE
+            || response.status() == TransferStatus.SAVE_REFUSED) {
             this.owned.add(playerUuid);
-            putVehicleBack(playerUuid, player);
+            this.logger.warning("Kept " + playerUuid + " here: " + response.status() + " ("
+                + response.failureMessage() + ")");
+            if (player != null) {
+                // Otherwise the only sign is being shoved back a block, which reads as the server
+                // being broken rather than as the border doing what it is for
+                this.notices.refused(player, response.status());
+            }
             return;
         }
-        putVehicleBack(playerUuid, player);
+
+        // ERROR only. Whether the save landed is exactly what is unknown, so this server must not
+        // carry on playing them - a second copy would write over one the proxy may already hold
         failed(playerUuid, player, response.status() + ": " + response.failureMessage(), null);
     }
 
@@ -234,6 +259,10 @@ public final class TransferService {
         // Whether the save went through is exactly what is unknown here, so this server must not keep
         // playing them: a second copy would write over the one the proxy may already hold
         player.kick(this.failureMessage);
+    }
+
+    static long millis(final long fromNanos, final long toNanos) {
+        return (toNanos - fromNanos) / 1_000_000L;
     }
 
     private static PlayerLocation toPlayerLocation(final Location location) {

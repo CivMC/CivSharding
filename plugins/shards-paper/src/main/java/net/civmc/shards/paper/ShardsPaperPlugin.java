@@ -5,6 +5,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import net.civmc.shards.api.ServerStartupRequest;
 import net.civmc.shards.api.ServerStartupResponse;
+import net.civmc.shards.paper.border.ArrivalCue;
+import net.civmc.shards.paper.border.BorderNotices;
 import net.civmc.shards.paper.border.ShardBorder;
 import net.civmc.shards.paper.border.ShardBorderListener;
 import net.civmc.shards.paper.border.TransferService;
@@ -21,12 +23,19 @@ import org.bukkit.plugin.java.JavaPlugin;
 public final class ShardsPaperPlugin extends JavaPlugin {
 
     private static final long SHUTDOWN_DRAIN_SECONDS = 20L;
+    private static final long SAVE_CHECK_TICKS = 20L;
+    private static final int MAX_SAVES_PER_RUN = 4;
+    private static final long STARTUP_RETRY_MIN_TICKS = 20L * 5L;
+    private static final long STARTUP_RETRY_MAX_TICKS = 20L * 60L;
 
     private ShardsPaperConfig config;
     private ShardsClient client;
     private OwnedPlayers owned;
     private TransferService transfers;
     private final ShardBorder border = new ShardBorder();
+    // Read from the login thread, written from whichever thread the startup answer arrives on
+    private volatile boolean startupComplete;
+    private long startupRetryTicks = STARTUP_RETRY_MIN_TICKS;
 
     @Override
     public void onEnable() {
@@ -40,18 +49,25 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         }
 
         this.client = new ShardsClient(this.config.connectionFactory(), this.config.serverName(), this, getLogger(),
-            this::releaseStaleLocks);
+            this::completeStartupHandshake);
         this.client.start();
         this.owned = new OwnedPlayers(this.client, getLogger(), this.config.serverName());
 
+        final BorderNotices notices = new BorderNotices();
         this.transfers = new TransferService(this, this.client, this.owned, getLogger(),
-            this.config.serverName(), this.config.failureMessage());
+            this.config.serverName(), this.config.failureMessage(), notices);
 
+        final ArrivalCue arrivalCue = new ArrivalCue(this.config.arrivalTitle(), this.config.arrivalSubtitle());
         getServer().getPluginManager().registerEvents(
             new PlayerDataListener(this, this.client, this.config.serverName(), this.config.failureMessage(),
-                this.owned, this.transfers), this);
-        getServer().getPluginManager().registerEvents(new ShardBorderListener(this.border, this.transfers), this);
+                this.owned, this.transfers, () -> this.startupComplete, arrivalCue), this);
+        if (!arrivalCue.isConfigured()) {
+            getLogger().info("No arrival title configured, so a crossing into this shard is unannounced");
+        }
+        getServer().getPluginManager().registerEvents(
+            new ShardBorderListener(this.border, this.transfers, notices), this);
         getCommand("shardsnapshot").setExecutor(new SnapshotVerifyCommand());
+        startPeriodicSave();
     }
 
     @Override
@@ -71,6 +87,25 @@ public final class ShardsPaperPlugin extends JavaPlugin {
     }
 
     /**
+     * Writes back the players who are due, once a second.
+     *
+     * <p>Every second rather than once an interval, writing only those actually due and a few at a
+     * time. Reading a player costs tens of milliseconds, so writing everyone on one tick would be a
+     * stall that arrives on a fixed cycle - which looks like the server hitching for no reason.</p>
+     */
+    private void startPeriodicSave() {
+        if (this.config.saveIntervalSeconds() <= 0) {
+            getLogger().warning("Periodic saving is off: anything since a player arrived is lost if this "
+                + "server is killed rather than stopped");
+            return;
+        }
+        final long dueAfterNanos = TimeUnit.SECONDS.toNanos(this.config.saveIntervalSeconds());
+        getServer().getScheduler().runTaskTimer(this, () -> this.owned.checkpointDue(dueAfterNanos, MAX_SAVES_PER_RUN),
+            SAVE_CHECK_TICKS, SAVE_CHECK_TICKS);
+        getLogger().info("Writing players back every " + this.config.saveIntervalSeconds() + "s");
+    }
+
+    /**
      * Moving a player to another shard, for other plugins.
      *
      * <p>Every reason for leaving a shard goes through the same thing - walking over a border, a
@@ -87,25 +122,30 @@ public final class ShardsPaperPlugin extends JavaPlugin {
     }
 
     /**
-     * Asks the proxy to drop whatever locks this server still holds. Correct only because it runs on
-     * the first connection after enable, when nobody is online: anything held under this server's
-     * name then was left by the run before it. On a later reconnect the same call would release the
-     * locks of the players currently being served.
+     * Asks the proxy to drop whatever locks this server still holds, and to say which areas it owns.
+     *
+     * <p>Releasing is correct only while nobody is online: anything held under this server's name then
+     * was left by the run before it, whereas the same call with players on would drop the locks of the
+     * people currently being served. That is why this runs on the first connection after enable - and
+     * why the retry below is safe, because a login is refused until this has succeeded.</p>
      */
-    private void releaseStaleLocks() {
+    private void completeStartupHandshake() {
         this.client.startup(ServerStartupRequest.create(this.config.serverName()))
             .whenComplete(this::logStartupResult);
     }
 
     private void logStartupResult(final ServerStartupResponse response, final Throwable error) {
         if (error != null) {
-            getLogger().log(Level.SEVERE, "Could not release stale player data locks", error);
+            getLogger().log(Level.SEVERE, "Could not complete the startup handshake", error);
+            retryStartupHandshake();
             return;
         }
         if (!response.success()) {
-            getLogger().severe("Could not release stale player data locks: " + response.failureMessage());
+            getLogger().severe("Could not complete the startup handshake: " + response.failureMessage());
+            retryStartupHandshake();
             return;
         }
+        this.startupComplete = true;
         getLogger().info("Released " + response.releasedLockCount() + " stale player data locks for "
             + this.config.serverName());
 
@@ -117,5 +157,22 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         } else {
             getLogger().info("Enforcing " + response.regions().size() + " shard area(s)");
         }
+    }
+
+    /**
+     * Asks again, rather than giving up for the lifetime of the server.
+     *
+     * <p>This used to be a log line and nothing else, which was the worse half of the failure: the
+     * areas this server owns arrive with the same answer, so a handshake that never completed left
+     * {@link ShardBorder} empty - and an empty border owns everywhere, so the server carried on
+     * serving players with no edge enforced and nothing saying so. Refusing logins until this
+     * succeeds is what makes both the wait and the repeated release safe.</p>
+     */
+    private void retryStartupHandshake() {
+        getLogger().warning("This server has no shard areas yet, so nobody may join it. Trying again in "
+            + (this.startupRetryTicks / 20L) + "s");
+        getServer().getScheduler().runTaskLaterAsynchronously(this, this::completeStartupHandshake,
+            this.startupRetryTicks);
+        this.startupRetryTicks = Math.min(this.startupRetryTicks * 2L, STARTUP_RETRY_MAX_TICKS);
     }
 }

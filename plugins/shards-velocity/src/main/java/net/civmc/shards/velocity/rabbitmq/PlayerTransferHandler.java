@@ -7,12 +7,16 @@ import com.velocitypowered.api.proxy.server.RegisteredServer;
 import java.util.Base64;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import net.civmc.shards.api.PlayerTransferRequest;
 import net.civmc.shards.api.PlayerTransferResponse;
 import net.civmc.shards.api.ShardServerId;
 import net.civmc.shards.api.ShardsRabbitMqTopology;
 import net.civmc.shards.api.TransferStatus;
 import net.civmc.shards.velocity.placement.ShardPlacementService;
+import net.civmc.shards.velocity.playerdata.InFlightTransfers;
 import net.civmc.shards.velocity.playerdata.PlayerDataService;
 import net.civmc.shards.velocity.playerdata.SaveResult;
 import org.slf4j.Logger;
@@ -28,16 +32,23 @@ import org.slf4j.Logger;
  */
 public final class PlayerTransferHandler implements RequestHandler<PlayerTransferRequest, PlayerTransferResponse> {
 
+    // Short: this sits in the pause the player is watching, and a shard that is up answers a ping on a
+    // local network in single figures. A shard that is down does not answer at all
+    private static final long REACHABILITY_TIMEOUT_MILLIS = 500L;
+
     private final PlayerDataService playerDataService;
     private final ShardPlacementService placementService;
+    private final InFlightTransfers inFlightTransfers;
     private final ProxyServer proxyServer;
     private final Logger logger;
 
     public PlayerTransferHandler(final PlayerDataService playerDataService,
-                                 final ShardPlacementService placementService, final ProxyServer proxyServer,
+                                 final ShardPlacementService placementService,
+                                 final InFlightTransfers inFlightTransfers, final ProxyServer proxyServer,
                                  final Logger logger) {
         this.playerDataService = playerDataService;
         this.placementService = placementService;
+        this.inFlightTransfers = inFlightTransfers;
         this.proxyServer = proxyServer;
         this.logger = logger;
     }
@@ -59,6 +70,7 @@ public final class PlayerTransferHandler implements RequestHandler<PlayerTransfe
 
     @Override
     public PlayerTransferResponse handle(final PlayerTransferRequest request) {
+        final long receivedAt = System.nanoTime();
         final Optional<String> destination = resolveDestination(request);
         if (destination.isEmpty()) {
             // Not an error for a location: shards are allowed not to touch, so ground owned by nobody
@@ -85,6 +97,14 @@ public final class PlayerTransferHandler implements RequestHandler<PlayerTransfe
                 "Player is no longer connected");
         }
 
+        if (!isReachable(target.get(), destination.get())) {
+            // Nothing written and nothing released, so the player simply stays where they are. Once the
+            // save has happened it cannot be taken back - the destination owns them from that moment -
+            // so a destination that is plainly down has to be caught before then, not after
+            return PlayerTransferResponse.of(request.requestId(), TransferStatus.DESTINATION_UNAVAILABLE,
+                "Destination shard is not answering");
+        }
+
         // Written back and released before the connect, because the destination claims during its own
         // pre-login and a lock still held there refuses the login outright.
         // A shard-addressed transfer stores no location, so the destination places them with its own
@@ -106,8 +126,38 @@ public final class PlayerTransferHandler implements RequestHandler<PlayerTransfe
         // Started, not waited for. The destination claims the player during its own pre-login, which
         // is a request this same consumer has to answer - so blocking here until the connect finishes
         // is waiting for a message that cannot be delivered until we stop waiting
+        final long savedAt = System.nanoTime();
+        // Recorded before the connect, so it is already there when the destination's pre-login asks.
+        // The claim happens inside the connect, and a record written afterwards would arrive too late
+        this.inFlightTransfers.started(request.playerUuid());
         beginConnect(request, player.get(), target.get(), destination.get());
+        this.logger.info("Handed {} to {}: saved and released in {}ms", request.playerUuid(), destination.get(),
+            (savedAt - receivedAt) / 1_000_000L);
         return PlayerTransferResponse.transferred(request.requestId(), destination.get());
+    }
+
+    /**
+     * Whether the destination is answering at all.
+     *
+     * <p>A ping rather than a guess, and it runs <strong>before</strong> anything is written. Past the
+     * save the player belongs to the destination whether they ever arrive or not, so the only place a
+     * shard that is simply down can be caught cheaply is here.</p>
+     *
+     * <p>It does not promise the connection will succeed - the destination could stop answering in the
+     * moment between. It turns the common case, a shard that has been stopped, from being kicked into
+     * standing still at the border.</p>
+     */
+    private boolean isReachable(final RegisteredServer target, final String destination) {
+        try {
+            target.ping().get(REACHABILITY_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+            return true;
+        } catch (final InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (final ExecutionException | TimeoutException exception) {
+            this.logger.warn("Not transferring to {}: it is not answering", destination);
+            return false;
+        }
     }
 
     private Optional<String> resolveDestination(final PlayerTransferRequest request) {
@@ -141,6 +191,8 @@ public final class PlayerTransferHandler implements RequestHandler<PlayerTransfe
             } else {
                 this.logger.error("Could not connect {} to {}", request.playerUuid(), destination, error);
             }
+            // Only reachable once the save has happened, so their data really is at the destination
+            // and reconnecting takes them there. Staying here is the option that would lose it
             player.disconnect(Component.text(
                 "Could not reach " + destination + ". Please reconnect - your data is safe."));
         });

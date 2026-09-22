@@ -14,6 +14,7 @@ import net.civmc.shards.api.snapshot.PotionEffectSnapshot;
 import net.civmc.shards.api.snapshot.VehicleSnapshot;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
+import org.bukkit.GameRules;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -29,6 +30,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
+import org.bukkit.util.Vector;
 
 /**
  * Reads a player into a {@link PlayerSnapshot} and writes one back.
@@ -98,7 +100,16 @@ public final class PlayerSnapshots {
             captureStatistics(player),
             captureRecipes(player),
             captureLocation(player.getRespawnLocation()),
-            vehicle);
+            vehicle,
+            player.getLocation().getYaw(),
+            player.getLocation().getPitch(),
+            player.getVelocity().getX(),
+            player.getVelocity().getY(),
+            player.getVelocity().getZ(),
+            player.getFallDistance(),
+            player.isSprinting(),
+            player.isGliding(),
+            player.isSwimming());
     }
 
     public static void restore(final Player player, final PlayerSnapshot snapshot) {
@@ -142,6 +153,29 @@ public final class PlayerSnapshots {
         restoreRespawnLocation(player, snapshot);
         // Last: the player has to exist where they are before anything can be put underneath them
         Vehicles.restore(player, snapshot.vehicle());
+    }
+
+    /**
+     * Puts a player back into the motion they were already in.
+     *
+     * <p>Separate from {@link #restore} because it has to happen a tick later. On the tick a player
+     * joins, the server sends them their position, and that overrides anything set here - so velocity
+     * applied during the join is thrown away and they stop dead in mid-air.</p>
+     *
+     * <p>Gliding needs the same wait for a different reason: it is refused unless the player already
+     * has elytra on, which is true only once the inventory from {@link #restore} has been applied.</p>
+     */
+    public static void restoreMotion(final Player player, final PlayerSnapshot snapshot) {
+        player.setVelocity(new Vector(snapshot.velocityX(), snapshot.velocityY(), snapshot.velocityZ()));
+        // Before gliding and sprinting, which a fall can clear
+        player.setFallDistance(snapshot.fallDistance());
+        if (snapshot.gliding()) {
+            player.setGliding(true);
+        }
+        player.setSprinting(snapshot.sprinting());
+        if (snapshot.swimming()) {
+            player.setSwimming(true);
+        }
     }
 
     private static String capturePersistentData(final Player player) {
@@ -238,12 +272,37 @@ public final class PlayerSnapshots {
         return awarded;
     }
 
+    /**
+     * Puts back every advancement the player had, without telling the server about it again.
+     *
+     * <p>The first time someone reaches a given shard, its own copy of their playerdata is empty, so
+     * every advancement they have ever earned is awarded here in one go. Left alone that announces
+     * each of them to everybody online - a screenful of "has made the advancement" for a player who
+     * walked ten blocks. The gamerule is turned off around the restore and put back exactly as it
+     * was, which is safe because this all happens within one tick and nothing else can earn an
+     * advancement in between.</p>
+     *
+     * <p><strong>The toasts cannot be suppressed.</strong> Awarding a criterion sends the client the
+     * advancement packet that drives them, and there is no public API to grant one quietly. So a
+     * player's first arrival on a shard still shows them their own advancement history as a stack of
+     * popups. Fixing that properly needs NMS, which this plugin deliberately does not use; the cost
+     * is bounded, since it happens once per player per shard and never again.</p>
+     */
     private static void restoreAdvancements(final Player player, final PlayerSnapshot snapshot) {
-        Bukkit.advancementIterator().forEachRemaining(advancement -> {
-            final List<String> wanted =
-                snapshot.advancementCriteria().getOrDefault(advancement.getKey().toString(), List.of());
-            applyAdvancement(player, advancement, wanted);
-        });
+        final World world = player.getWorld();
+        final Boolean announced = world.getGameRuleValue(GameRules.SHOW_ADVANCEMENT_MESSAGES);
+        world.setGameRule(GameRules.SHOW_ADVANCEMENT_MESSAGES, false);
+        try {
+            Bukkit.advancementIterator().forEachRemaining(advancement -> {
+                final List<String> wanted =
+                    snapshot.advancementCriteria().getOrDefault(advancement.getKey().toString(), List.of());
+                applyAdvancement(player, advancement, wanted);
+            });
+        } finally {
+            // Put back whatever it was, including when the restore threw. Leaving it off would
+            // silence advancements for everyone on this shard from then on
+            world.setGameRule(GameRules.SHOW_ADVANCEMENT_MESSAGES, announced == null || announced);
+        }
     }
 
     private static void applyAdvancement(final Player player, final Advancement advancement,
@@ -379,11 +438,16 @@ public final class PlayerSnapshots {
                 wanted.add(key);
             }
         }
-        final List<NamespacedKey> toUndiscover = new ArrayList<>(player.getDiscoveredRecipes());
+        final List<NamespacedKey> known = new ArrayList<>(player.getDiscoveredRecipes());
+        final List<NamespacedKey> toUndiscover = new ArrayList<>(known);
         toUndiscover.removeAll(wanted);
         if (!toUndiscover.isEmpty()) {
             player.undiscoverRecipes(toUndiscover);
         }
+        // Only the ones they do not already have. Handing the whole list over works, but the recipe
+        // book treats each as newly unlocked, so a player crossing back and forth would be shown the
+        // same stack of recipe popups every time
+        wanted.removeAll(known);
         if (!wanted.isEmpty()) {
             player.discoverRecipes(wanted);
         }

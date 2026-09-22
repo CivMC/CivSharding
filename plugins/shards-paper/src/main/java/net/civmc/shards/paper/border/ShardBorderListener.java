@@ -47,12 +47,19 @@ import org.bukkit.event.vehicle.VehicleMoveEvent;
  */
 public final class ShardBorderListener implements Listener {
 
+    // Far enough to be a warning rather than a surprise, near enough that it is not shown to someone
+    // merely walking about within their own shard
+    private static final int APPROACH_RADIUS = 8;
+
     private final ShardBorder border;
     private final TransferService transfers;
+    private final BorderNotices notices;
 
-    public ShardBorderListener(final ShardBorder border, final TransferService transfers) {
+    public ShardBorderListener(final ShardBorder border, final TransferService transfers,
+                               final BorderNotices notices) {
         this.border = border;
         this.transfers = transfers;
+        this.notices = notices;
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
@@ -65,12 +72,28 @@ public final class ShardBorderListener implements Listener {
             return;
         }
         if (!this.border.isOutside(to)) {
+            warnIfNearEdge(event.getPlayer(), to);
             return;
         }
-        // Cancelled either way. The player is held at the edge until the transfer answers, so they
-        // cannot keep walking into ground this server is not authoritative for
-        event.setCancelled(true);
+        // Handed over first, cancelled second. Cancelling a move puts the player back where they
+        // were, and their motion goes with it - so capturing after the cancel would carry a player
+        // who is standing still, and a sprint jump over a border would stop dead on the far side.
+        // Cancelled either way: they are held at the edge until the transfer answers, so they cannot
+        // keep walking into ground this server is not authoritative for
         this.transfers.transferTo(event.getPlayer(), to);
+        event.setCancelled(true);
+    }
+
+    /**
+     * Says so while a player walks towards a border, so the edge is not a surprise.
+     *
+     * <p>Only on a block change, which the caller has already filtered to - the search is four short
+     * walks outward, and running it every fraction of a block would be paying for it sixty times a
+     * second for no more information.</p>
+     */
+    private void warnIfNearEdge(final Player player, final Location at) {
+        this.border.nearestEdge((int) Math.floor(at.getX()), (int) Math.floor(at.getZ()), APPROACH_RADIUS)
+            .ifPresent(edge -> this.notices.approaching(player, null));
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
