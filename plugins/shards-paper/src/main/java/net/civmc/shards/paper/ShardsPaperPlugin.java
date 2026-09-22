@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import net.civmc.shards.api.ParticleMessage;
+import net.civmc.shards.api.PlayerSummonMessage;
 import net.civmc.shards.api.ServerStartupRequest;
 import net.civmc.shards.api.ServerStartupResponse;
 import net.civmc.shards.paper.border.ArrivalCue;
@@ -55,6 +56,10 @@ import net.civmc.shards.paper.mirror.UnownedGroundListener;
 import net.civmc.shards.paper.mirror.UnownedTakingsListener;
 import net.civmc.shards.paper.playerdata.OwnedPlayers;
 import net.civmc.shards.paper.playerdata.PlayerDataListener;
+import net.civmc.shards.paper.teleport.FollowingSomebody;
+import net.civmc.shards.paper.teleport.NetworkTeleport;
+import net.civmc.shards.paper.teleport.NetworkTeleportListener;
+import net.civmc.shards.paper.teleport.Summons;
 import net.civmc.shards.paper.rabbitmq.ShardsClient;
 import net.civmc.shards.paper.rabbitmq.ShardsServer;
 import net.civmc.shards.paper.sky.SkyListener;
@@ -148,6 +153,16 @@ public final class ShardsPaperPlugin extends JavaPlugin {
                 getLogger()), this);
         getServer().getPluginManager().registerEvents(
             new ShardRespawnListener(this, this.border, this.transfers, getLogger()), this);
+        final FollowingSomebody following = new FollowingSomebody(this);
+        getServer().getPluginManager().registerEvents(
+            new NetworkTeleportListener(this, new NetworkTeleport(this, this.client, this.transfers,
+                following, this.config.serverName(), getLogger()), following, getLogger()), this);
+        // The other half of it: moving somebody who is not here cannot be done from here, so it is
+        // asked of every shard and answered by the one that has them
+        final Summons summons = new Summons(this, this.border, this.transfers, following, getLogger());
+        this.client.subscribe(ShardsRabbitMqTopology.PLAYER_SUMMON_EXCHANGE, PlayerSummonMessage.class,
+            PlayerSummonMessage::serverName, summons::receive);
+        getCommand("shardsnapshot").setExecutor(new SnapshotVerifyCommand());
         startSkySync();
         startUnownedEntityView();
         // Not inside the method above: that one is switched off by hide-unowned-entities, which is a

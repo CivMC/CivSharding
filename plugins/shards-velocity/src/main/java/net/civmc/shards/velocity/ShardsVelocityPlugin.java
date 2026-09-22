@@ -33,6 +33,7 @@ import net.civmc.shards.velocity.rabbitmq.CargoStatusHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerCheckpointHandler;
 import net.civmc.shards.velocity.rabbitmq.BorderProbeHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerClaimHandler;
+import net.civmc.shards.velocity.rabbitmq.PlayerLocateHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerReleaseHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerSaveHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerTransferHandler;
@@ -93,6 +94,26 @@ public final class ShardsVelocityPlugin {
         // Shared by the two handlers that between them make a crossing tellable from a login: the
         // transfer writes the record and the claim that follows reads it
         final InFlightTransfers inFlightTransfers = new InFlightTransfers();
+        this.requestConsumer = new ShardsRequestConsumer(shardsConfig.rabbitmq().connectionFactory(),
+            List.of(
+                new ServerStartupHandler(this.playerDataService, this.shardPlacementService, this.logger),
+                new PlayerClaimHandler(this.playerDataService, this.shardPlacementService, inFlightTransfers,
+                    this.logger),
+                new PlayerSaveHandler(this.playerDataService, this.logger),
+                new PlayerCheckpointHandler(this.playerDataService, this.logger),
+                new PlayerReleaseHandler(this.playerDataService, this.logger),
+                new PlayerLocateHandler(this.playerDataService, this.shardPlacementService, this.proxyServer),
+                new PlayerTransferHandler(this.playerDataService, this.shardPlacementService,
+                    inFlightTransfers, this.proxyServer, this.logger),
+                new CargoSendHandler(cargoService, this.shardPlacementService, this.proxyServer, this.logger),
+                new CargoFetchHandler(cargoService, this.logger),
+                new CargoReserveHandler(cargoService, this.logger),
+                new CargoLandedHandler(cargoService, this.logger),
+                new CargoStatusHandler(cargoService, this.logger),
+                new BorderProbeHandler(this.shardPlacementService, this.proxyServer, this.logger),
+                new SkyStateHandler(skyService),
+                new NightSkipHandler(skyService, this.logger)),
+            this.proxyServer, this, this.logger);
         if (!this.requestConsumer.start()) {
             this.logger.warn("Shards could not start its request consumer; no server can reach its player data");
         }
