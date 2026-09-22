@@ -4,6 +4,7 @@ import java.util.Optional;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
+import net.civmc.shards.api.ParticleMessage;
 import net.civmc.shards.api.ServerStartupRequest;
 import net.civmc.shards.api.ServerStartupResponse;
 import net.civmc.shards.paper.border.ArrivalCue;
@@ -24,6 +25,9 @@ import net.civmc.shards.paper.config.ShardsPaperConfig;
 import net.civmc.shards.paper.mirror.BorderBandSync;
 import net.civmc.shards.paper.mirror.BorderBandUpdates;
 import net.civmc.shards.paper.mirror.MirrorMobPublisher;
+import net.civmc.shards.paper.mirror.MirrorParticlePublisher;
+import net.civmc.shards.paper.mirror.MirrorParticleView;
+import net.civmc.shards.paper.mirror.MirrorParticles;
 import net.civmc.shards.paper.mirror.MirrorMobView;
 import net.civmc.shards.paper.mirror.MirrorMobs;
 import net.civmc.shards.paper.mirror.ChunkRevisions;
@@ -133,12 +137,14 @@ public final class ShardsPaperPlugin extends JavaPlugin {
                 getLogger()), this);
         getServer().getPluginManager().registerEvents(
             new ShardRespawnListener(this, this.border, this.transfers, getLogger()), this);
+        startSkySync();
         startUnownedEntityView();
         // Not inside the method above: that one is switched off by hide-unowned-entities, which is a
         // question about what a border looks like and what can be farmed near it. This is a question
         // about what a player walks away with, and is not the operator's to turn off
         getServer().getPluginManager().registerEvents(new UnownedTakingsListener(this.border), this);
         startEntitySweep();
+        startMirror(outlook);
         startPeriodicSave();
         startBorderView(this.view);
     }
@@ -252,7 +258,180 @@ public final class ShardsPaperPlugin extends JavaPlugin {
     }
 
 
+    /**
+     * Shows what the neighbouring shards really have on the ground past the border.
+     *
+     * <p>Every shard's world begins as a copy of the same map, so unmodified ground already matches -
+     * but everything built on a neighbour since is missing from this server's copy, and the gap grows
+     * for as long as the map lives. The neighbour is asked for the chunk as it really is and the
+     * difference is sent to clients; nothing is ever written into this server's world, so none of it
+     * can be reinforced, counted, broken or picked up.</p>
+     */
+    private void startMirror(final BorderOutlook outlook) {
+        if (!this.config.mirrorChunks()) {
+            return;
+        }
+        final MirrorMetrics metrics = new MirrorMetrics();
+        // Shared by the two halves that have to agree on one count: the publisher that numbers an
+        // announcement, and the provider that says which number a snapshot was taken at
+        final ChunkRevisions revisions = new ChunkRevisions();
+        // Before the players, who are now drawn with two numbered fields of their own
+        this.entityDataLayout = startEntityDataLayout();
+        final MirrorPlayers players = startPlayerMirror();
+        // Everything else that moves: a minecart on a rail beside a seam, a farm's animals, a dropped
+        // item. The last of what a border was still missing once the buildings and the people were on
+        final MirrorMobs mobs = startMobMirror();
+        // And every sign of anything happening: the dust off a pick, a brewing stand's bubbles, an
+        // explosion. All of it is particles, and all of it is one channel
+        final MirrorParticles particles = startParticleMirror();
+        // As far as the client renders, which is what has to look right. The neighbour's own view
+        // distance does not come into it - it is this server's players who are looking
+        final MirrorView mirror = new MirrorView(this, this.border, outlook, this.client,
+            this.config.serverName(), getLogger(), getServer().getViewDistance(), metrics,
+            startEntityMirror());
+        this.mirror = mirror;
+        startMirrorStore(mirror);
+        final BorderBandSync bandSync = new BorderBandSync(this, this.border, this.client, mirror,
+            this.config.serverName(), getLogger(), this.config.borderBandChunks());
+        // The same band, kept up to date for the rest of the server's life rather than only at the
+        // moment it started: a neighbour that digs out their side of a seam at noon would otherwise
+        // leave this server simulating against a wall that has not been there since the morning
+        final BorderBandUpdates bandUpdates = new BorderBandUpdates(this, bandSync, mirror, getLogger());
+        this.mirrorServer = new ShardsServer(this.config.connectionFactory(), this.config.serverName(), this,
+            getLogger(), new ChunkStateProvider(this.border, revisions), metrics,
+            // Announcements arrive on a broker thread and these read the world and send to players.
+            // The ground first, so that the mirror finds this server's own block already agreeing and
+            // draws nothing over it rather than caching a picture of what is really there
+            update -> getServer().getScheduler().runTask(this, () -> {
+                bandUpdates.apply(update);
+                mirror.applyUpdate(update);
+            }),
+            positions -> getServer().getScheduler().runTask(this, () -> players.apply(positions)),
+            movers -> getServer().getScheduler().runTask(this, () -> mobs.apply(movers)));
+        this.mirrorServer.start();
+        getServer().getPluginManager().registerEvents(mirror, this);
 
+        // Before anything is drawn and while nobody is on: what this writes is the ground itself, and
+        // the mirror's picture of a chunk is a difference from that ground
+        bandSync.start();
+        getServer().getScheduler().runTaskTimer(this, bandUpdates::drain, 1L, 1L);
+        // A refused placement makes the client correct itself to what is really there, which for
+        // another shard's ground is this server's own copy - so the mirror has to be drawn again
+        getServer().getPluginManager().registerEvents(new MirrorRepairListener(this, mirror), this);
+
+        // Tells the other shards what has just changed here, so none of them has to re-read a chunk to
+        // find out. Flushed once a tick: a block changed several times in one tick is sent once
+        final MirrorUpdatePublisher publisher = new MirrorUpdatePublisher(this.border, this.client,
+            this.config.serverName(), getLogger(), revisions);
+        getServer().getPluginManager().registerEvents(publisher, this);
+        getServer().getScheduler().runTaskTimer(this, publisher::flush, 1L, 1L);
+
+        // The same for the frames and stands, on the same count, so a missed announcement of either is
+        // noticed the same way. Separate from the blocks because nothing about a frame is a block
+        // change and no block event ever fires for one
+        final MirrorEntityPublisher entityPublisher = new MirrorEntityPublisher(this.border, this.client,
+            this.config.serverName(), revisions);
+        getServer().getPluginManager().registerEvents(entityPublisher, this);
+        getServer().getScheduler().runTaskTimer(this, entityPublisher::flush, 1L, 1L);
+
+        // And what this shard's signs say, on the same count again. A sign is a block and arrives as
+        // one, but what is written on it is not part of the block and nothing else would carry it
+        final MirrorSignPublisher signPublisher = new MirrorSignPublisher(this, this.border, this.client,
+            this.config.serverName(), revisions);
+        getServer().getPluginManager().registerEvents(signPublisher, this);
+        getServer().getScheduler().runTaskTimer(this, signPublisher::flush, 1L, 1L);
+
+        // Where this shard's players are, every tick, for the shards that can see that ground. Sent
+        // whether or not this server can show anybody: a neighbour may be able to even if we cannot
+        final MirrorPlayerPublisher playerPublisher = new MirrorPlayerPublisher(this.border, this.client,
+            this.config.serverName());
+        // A listener as well as a timer: a swing of the arm is an event, and it goes out with the
+        // position sent on the tick it happened
+        getServer().getPluginManager().registerEvents(playerPublisher, this);
+        getServer().getScheduler().runTaskTimer(this, playerPublisher::publish, 1L, 1L);
+        getServer().getScheduler().runTaskTimer(this, players::expire, 20L, 20L);
+
+        // And where this shard's minecarts, animals and dropped items are, on the same tick and the
+        // same terms. Sent whether or not this server can draw a neighbour's: a neighbour may be able
+        // to draw ours even where we cannot draw theirs
+        if (this.config.mirrorMovingEntities()) {
+            final MirrorMobPublisher mobPublisher = new MirrorMobPublisher(this.border, this.client,
+                this.config.serverName(), getLogger());
+            getServer().getScheduler().runTaskTimer(this, mobPublisher::publish, 1L, 1L);
+            getServer().getScheduler().runTaskTimer(this, mobs::expire, 20L, 20L);
+        }
+
+        // And the particles, on the same tick. Announced only while this server can also draw a
+        // neighbour's, because both halves need the packet library and a shard that announces bursts
+        // nobody near it can draw is paying for a picture it cannot see
+        if (particles != MirrorParticles.NONE) {
+            final MirrorParticlePublisher particlePublisher = new MirrorParticlePublisher(this.border,
+                this.client, this.config.serverName(), getLogger());
+            particlePublisher.watch();
+            getServer().getScheduler().runTaskTimer(this, particlePublisher::publish, 1L, 1L);
+            this.client.subscribe(ShardsRabbitMqTopology.MIRROR_PARTICLE_EXCHANGE, ParticleMessage.class,
+                ParticleMessage::serverName,
+                // Arrives on a broker thread, and drawing reads the players
+                message -> getServer().getScheduler().runTask(this, () -> particles.apply(message)));
+        }
+        getServer().getScheduler().runTaskTimer(this, () -> {
+            for (final Player player : Bukkit.getOnlinePlayers()) {
+                mirror.update(player);
+            }
+        }, MIRROR_TICKS, MIRROR_TICKS);
+        // Nothing else ever removes a chunk from the mirror, so without this there is one entry for
+        // every chunk of border anybody has ever stood at, for as long as the server runs
+        getServer().getScheduler().runTaskTimer(this, mirror::forgetWhatNobodyIsLookingAt,
+            MIRROR_FORGET_TICKS, MIRROR_FORGET_TICKS);
+        // What the mirror costs is not visible from anywhere else, and the two numbers it reports -
+        // how long a chunk takes to read, and how many blocks really differ - are what decide whether
+        // this survives a busy border
+        getServer().getScheduler().runTaskTimerAsynchronously(this, () -> metrics.report(getLogger()),
+            MIRROR_REPORT_TICKS, MIRROR_REPORT_TICKS);
+    }
+
+    /**
+     * Shows the players on other shards, if there is anything here that can.
+     *
+     * <p>Showing a player who is not really here is the one thing the mirror cannot do over the public
+     * API, so it needs PacketEvents - which is a soft dependency, and might not be installed, or might
+     * be installed broken. Both have to end with this server running everything else rather than not
+     * starting.</p>
+     *
+     * <p>Hence the care: the class that uses the library is never named until the library is known to
+     * have loaded, and the construction is guarded against {@link NoClassDefFoundError} as well as
+     * ordinary failure. A half-installed library throws that at the point of first use rather than at
+     * load, which is how this took the border, the transfers and the sky down with it.</p>
+     */
+    /**
+     * Starts reading metadata field numbers off this server's own entities.
+     *
+     * <p>The second place a field number is looked for, behind the class the server declares it on.
+     * It stays for the reason it was written: it needs nothing of the server's internals, so it is
+     * what answers on a server this was not written against.</p>
+     *
+     * <p>Behind the same guard as the rest of the packet work, for the same reason: a soft dependency
+     * that takes the plugin down when it is missing is not soft.</p>
+     */
+    private EntityDataLayout startEntityDataLayout() {
+        final Plugin packetEvents = getServer().getPluginManager().getPlugin("packetevents");
+        if (packetEvents == null || !packetEvents.isEnabled()) {
+            return EntityDataLayout.UNKNOWN;
+        }
+        try {
+            final LearnedEntityDataLayout layout = new LearnedEntityDataLayout(getLogger());
+            layout.watch();
+            // What the network threads saw, turned into what is known, where the server's entity table
+            // can be read. Once a second: nothing is waiting on it, and a field is learned the first
+            // time an entity of that kind is sent to anybody
+            getServer().getScheduler().runTaskTimer(this, layout::settle, 20L, 20L);
+            return layout;
+        } catch (final RuntimeException | LinkageError exception) {
+            getLogger().log(Level.WARNING, "PacketEvents is installed but its metadata could not be "
+                + "read, so nothing that needs a metadata field number will be drawn", exception);
+            return EntityDataLayout.UNKNOWN;
+        }
+    }
 
     /**
      * Starts drawing the frames and stands a neighbouring shard has.
@@ -263,6 +442,12 @@ public final class ShardsPaperPlugin extends JavaPlugin {
      * start without it.</p>
      */
     private MirrorEntities startEntityMirror() {
+        final Plugin packetEvents = getServer().getPluginManager().getPlugin("packetevents");
+        if (packetEvents == null || !packetEvents.isEnabled()) {
+            getLogger().info("PacketEvents is not installed, so the frames and stands on other shards "
+                + "will not be drawn. The blocks of their builds still are");
+            return MirrorEntities.NONE;
+        }
         try {
             if (this.entityDataLayout instanceof LearnedEntityDataLayout learned) {
                 return new MirrorEntityView(learned);
@@ -307,8 +492,69 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         }
     }
 
+    /**
+     * Starts drawing what happens on a neighbouring shard, which is almost entirely particles.
+     *
+     * <p>Its own switch on the packet library, like the frames, the players and the mobs, and its own
+     * quiet fallback: a shard that cannot draw a neighbour's dust still draws their buildings, their
+     * animals and the people standing among them.</p>
+     */
+    private MirrorParticles startParticleMirror() {
+        final Plugin packetEvents = getServer().getPluginManager().getPlugin("packetevents");
+        if (packetEvents == null || !packetEvents.isEnabled()) {
+            getLogger().info("PacketEvents is not installed, so the particles on other shards will not "
+                + "be drawn. Everything else about the mirror works without it");
+            return MirrorParticles.NONE;
+        }
+        try {
+            return new MirrorParticleView();
+        } catch (final RuntimeException | LinkageError exception) {
+            getLogger().log(Level.SEVERE, "PacketEvents is installed but could not be used, so the "
+                + "particles on other shards will not be drawn. Everything else about the mirror is "
+                + "unaffected", exception);
+            return MirrorParticles.NONE;
+        }
+    }
 
+    private MirrorPlayers startPlayerMirror() {
+        final Plugin packetEvents = getServer().getPluginManager().getPlugin("packetevents");
+        if (packetEvents == null || !packetEvents.isEnabled()) {
+            getLogger().info("PacketEvents is not installed, so players on other shards will not be shown. "
+                + "Everything else about the mirror works without it");
+            return MirrorPlayers.NONE;
+        }
+        try {
+            final MirrorPlayerView view = new MirrorPlayerView(
+                this.entityDataLayout instanceof LearnedEntityDataLayout learned ? learned : null);
+            getServer().getPluginManager().registerEvents(view, this);
+            return view;
+        } catch (final RuntimeException | LinkageError exception) {
+            getLogger().log(Level.SEVERE, "PacketEvents is installed but could not be used, so players on "
+                + "other shards will not be shown. Everything else about the mirror is unaffected", exception);
+            return MirrorPlayers.NONE;
+        }
+    }
 
+    /**
+     * Keeps this shard's sky the same as everybody else's.
+     *
+     * <p>The ground either side of a border is identical, so the sky is the one thing that gives a
+     * crossing away. Each shard asks rather than being told, which means one that has just started or
+     * just reconnected is right within a single interval without the proxy tracking who is listening.</p>
+     */
+    private void startSkySync() {
+        if (this.config.skySyncSeconds() <= 0) {
+            getLogger().warning("Sky sync is off: this server runs its own clock and weather, so a crossing "
+                + "can take a player from noon into a thunderstorm");
+            return;
+        }
+        final SkySync sync = new SkySync(this, this.client, this.config.serverName(), getLogger());
+        getServer().getPluginManager().registerEvents(
+            new SkyListener(this, this.client, sync, this.config.serverName(), getLogger()), this);
+        final long ticks = this.config.skySyncSeconds() * 20L;
+        getServer().getScheduler().runTaskTimer(this, sync::poll, ticks, ticks);
+        getLogger().info("Following the network's sky, checked every " + this.config.skySyncSeconds() + "s");
+    }
 
     /**
      * Writes back the players who are due, once a second.

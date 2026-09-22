@@ -30,6 +30,7 @@ import net.civmc.shards.api.BorderProbeRequest;
 import net.civmc.shards.api.ChunkStateRequest;
 import net.civmc.shards.api.ChunkUpdateMessage;
 import net.civmc.shards.api.MobPositionMessage;
+import net.civmc.shards.api.ParticleMessage;
 import net.civmc.shards.api.PlayerPositionMessage;
 import net.civmc.shards.api.ChunkStateResponse;
 import net.civmc.shards.api.NightSkipRequest;
@@ -269,6 +270,16 @@ public final class ShardsClient implements AutoCloseable {
             ShardsRabbitMqTopology.MIRROR_UPDATE_TTL_MILLIS);
     }
 
+    /**
+     * Announces the particles this shard has just shown, to every shard at once.
+     *
+     * <p>Fire and forget with a short life: a burst that arrives late is a puff of smoke from
+     * something that has finished happening.</p>
+     */
+    public void publishParticles(final ParticleMessage particles) {
+        announce(ShardsRabbitMqTopology.MIRROR_PARTICLE_EXCHANGE, particles,
+            ShardsRabbitMqTopology.MIRROR_PARTICLE_TTL_MILLIS);
+    }
 
 
     /**
