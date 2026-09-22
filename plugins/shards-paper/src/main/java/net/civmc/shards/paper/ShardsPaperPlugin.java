@@ -18,6 +18,7 @@ import net.civmc.shards.paper.border.ShardBorder;
 import net.civmc.shards.paper.border.ShardBorderListener;
 import net.civmc.shards.paper.border.ShardRespawnListener;
 import net.civmc.shards.paper.border.TransferService;
+import net.civmc.shards.paper.cargo.CargoService;
 import net.civmc.shards.paper.config.ShardsPaperConfig;
 import net.civmc.shards.paper.mirror.BorderBandSync;
 import net.civmc.shards.paper.mirror.BorderBandUpdates;
@@ -81,6 +82,7 @@ public final class ShardsPaperPlugin extends JavaPlugin {
     private ShardsClient client;
     private OwnedPlayers owned;
     private TransferService transfers;
+    private CargoService cargo;
     private ShardsServer mirrorServer;
     private MirrorView mirror;
     private BorderEntitySweep entitySweep;
@@ -112,6 +114,13 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         this.view = new BorderView(this.border, outlook, notices, renderer());
         this.transfers = new TransferService(this, this.client, this.owned, getLogger(),
             this.config.serverName(), this.config.failureMessage(), notices, this.view);
+
+        // Started before anything can register a lander, so a plugin that depends on Shards finds it
+        // ready during its own enable. The sweep itself does nothing until the startup handshake has
+        // said which ground is this server's
+        this.cargo = new CargoService(this, this.client, getLogger(), this.config.serverName(),
+            () -> this.startupComplete);
+        this.cargo.startSweep();
 
         final ArrivalCue arrivalCue = new ArrivalCue(this.config.arrivalTitle(), this.config.arrivalSubtitle());
         getServer().getPluginManager().registerEvents(
@@ -554,6 +563,35 @@ public final class ShardsPaperPlugin extends JavaPlugin {
      */
     public Optional<TransferService> getTransfers() {
         return Optional.ofNullable(this.transfers);
+    }
+
+    /**
+     * The ground this server owns, for other plugins.
+     *
+     * <p>For anything that has to put something down somewhere of its own choosing - a rocket picking
+     * a clear landing site, say. Searching outwards without consulting this walks over a border and
+     * builds on a neighbour's ground, where this server's copy of the world is a year out of date and
+     * nobody else can see what was built.</p>
+     *
+     * <p>A server with no areas owns everywhere as far as this is concerned; it is not a shard.</p>
+     */
+    public ShardBorder getShardBorder() {
+        return this.border;
+    }
+
+    /**
+     * Moving things that no player is carrying, for other plugins.
+     *
+     * <p>Separate from a transfer because the problem is a different one. A player's belongings are
+     * safe across a border because they never exist anywhere but on the player; a rocket's hold is
+     * blocks and chest contents in a world, which really are destroyed at one end and created at the
+     * other. What this gives is the row that makes that pair of actions safe to interleave with a
+     * crash.</p>
+     *
+     * @return empty until this plugin has enabled
+     */
+    public Optional<CargoService> getCargo() {
+        return Optional.ofNullable(this.cargo);
     }
 
     /**

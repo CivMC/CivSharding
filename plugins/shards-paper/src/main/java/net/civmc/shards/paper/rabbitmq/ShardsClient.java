@@ -23,6 +23,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import net.civmc.shards.api.BorderProbeRequest;
+import net.civmc.shards.api.CargoFetchRequest;
+import net.civmc.shards.api.CargoFetchResponse;
+import net.civmc.shards.api.CargoLandedRequest;
+import net.civmc.shards.api.CargoLandedResponse;
+import net.civmc.shards.api.CargoReserveRequest;
+import net.civmc.shards.api.CargoReserveResponse;
+import net.civmc.shards.api.CargoSendRequest;
+import net.civmc.shards.api.CargoSendResponse;
+import net.civmc.shards.api.CargoStatusRequest;
+import net.civmc.shards.api.CargoStatusResponse;
 import net.civmc.shards.api.ChunkStateRequest;
 import net.civmc.shards.api.ChunkUpdateMessage;
 import net.civmc.shards.api.MobPositionMessage;
@@ -196,6 +206,50 @@ public final class ShardsClient implements AutoCloseable {
     public CompletableFuture<PlayerTransferResponse> transfer(final PlayerTransferRequest request) {
         return publish(ShardsRabbitMqTopology.PLAYER_TRANSFER_QUEUE, request.requestId(), request,
             PlayerTransferResponse.class);
+    }
+
+    /**
+     * Hands a parcel to whichever shard owns where it is going.
+     *
+     * <p>An answer of {@code SENT} means the destination owns it, and this server must then destroy
+     * its own copy and make that destruction durable. Keeping it would be duplicating it.</p>
+     */
+    public CompletableFuture<CargoSendResponse> sendCargo(final CargoSendRequest request) {
+        return publish(ShardsRabbitMqTopology.CARGO_SEND_QUEUE, request.requestId(), request,
+            CargoSendResponse.class);
+    }
+
+    /**
+     * Asks for the parcels this server owns and has not yet put in its world.
+     */
+    public CompletableFuture<CargoFetchResponse> fetchCargo(final CargoFetchRequest request) {
+        return publish(ShardsRabbitMqTopology.CARGO_FETCH_QUEUE, request.requestId(), request,
+            CargoFetchResponse.class);
+    }
+
+    /**
+     * Writes down where this server is about to put a parcel. Sent before any blocks are written, so
+     * that a second attempt at the same parcel puts it in the same place.
+     */
+    public CompletableFuture<CargoReserveResponse> reserveCargoSite(final CargoReserveRequest request) {
+        return publish(ShardsRabbitMqTopology.CARGO_RESERVE_QUEUE, request.requestId(), request,
+            CargoReserveResponse.class);
+    }
+
+    /**
+     * Says a parcel is in this server's world and on its disk. Sent after the flush, never before.
+     */
+    public CompletableFuture<CargoLandedResponse> cargoLanded(final CargoLandedRequest request) {
+        return publish(ShardsRabbitMqTopology.CARGO_LANDED_QUEUE, request.requestId(), request,
+            CargoLandedResponse.class);
+    }
+
+    /**
+     * Asks what has become of a parcel this server sent, and where it was put down.
+     */
+    public CompletableFuture<CargoStatusResponse> cargoStatus(final CargoStatusRequest request) {
+        return publish(ShardsRabbitMqTopology.CARGO_STATUS_QUEUE, request.requestId(), request,
+            CargoStatusResponse.class);
     }
 
     /**

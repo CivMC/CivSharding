@@ -21,6 +21,20 @@ public final class ShardsRabbitMqTopology {
     public static final String PLAYER_TRANSFER_QUEUE = "shards.playerdata.transfer";
     public static final String PLAYER_CHECKPOINT_QUEUE = "shards.playerdata.checkpoint";
 
+    /**
+     * Where things that are not a player are handed from one shard to another.
+     *
+     * <p>Apart from the player queues because a parcel outlives the request that moved it. A player
+     * transfer is finished when it is answered; a parcel is a row that stays until a shard has put it
+     * in its world, which may be after a restart, so these are the operations on a store rather than
+     * one handover.</p>
+     */
+    public static final String CARGO_SEND_QUEUE = "shards.cargo.send";
+    public static final String CARGO_FETCH_QUEUE = "shards.cargo.fetch";
+    public static final String CARGO_RESERVE_QUEUE = "shards.cargo.reserve";
+    public static final String CARGO_LANDED_QUEUE = "shards.cargo.landed";
+    public static final String CARGO_STATUS_QUEUE = "shards.cargo.status";
+
     public static final String BORDER_PROBE_QUEUE = "shards.border.probe";
     // A probe is about where a player is standing right now, so one still sitting in the queue
     // seconds later is answering a question nobody has any more. The sender has already given up on

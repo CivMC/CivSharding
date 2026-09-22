@@ -9,6 +9,7 @@ import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.ProxyServer;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
@@ -23,6 +24,12 @@ import net.civmc.shards.velocity.placement.ShardPlacementService;
 import net.civmc.shards.velocity.playerdata.InFlightTransfers;
 import net.civmc.shards.velocity.playerdata.PlayerDataService;
 import net.civmc.shards.velocity.playerdata.ShardLockExpiry;
+import net.civmc.shards.velocity.cargo.CargoService;
+import net.civmc.shards.velocity.rabbitmq.CargoFetchHandler;
+import net.civmc.shards.velocity.rabbitmq.CargoLandedHandler;
+import net.civmc.shards.velocity.rabbitmq.CargoReserveHandler;
+import net.civmc.shards.velocity.rabbitmq.CargoSendHandler;
+import net.civmc.shards.velocity.rabbitmq.CargoStatusHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerCheckpointHandler;
 import net.civmc.shards.velocity.rabbitmq.BorderProbeHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerClaimHandler;
@@ -42,6 +49,11 @@ public final class ShardsVelocityPlugin {
     // Slow on purpose: it costs a pass over every pair of players, and nothing it fixes is urgent -
     // the events do the urgent half
     private static final long TAB_LIST_SYNC_SECONDS = 10L;
+
+    // Rows for parcels that have already been landed, kept a while so a launch that went wrong is
+    // still there to be looked at. Only ever landed ones are forgotten - see CargoService#pruneLanded
+    private static final Duration CARGO_RETENTION = Duration.ofDays(7L);
+    private static final long CARGO_PRUNE_HOURS = 6L;
 
     private final ProxyServer proxyServer;
     private final Logger logger;
@@ -72,6 +84,7 @@ public final class ShardsVelocityPlugin {
 
         this.shardPlacementService = shardsInjector.getInstance(ShardPlacementService.class);
         this.playerDataService = shardsInjector.getInstance(PlayerDataService.class);
+        final CargoService cargoService = shardsInjector.getInstance(CargoService.class);
 
         // One clock and one weather for the network, so a crossing does not take a player from noon
         // into a thunderstorm while the ground stays continuous
@@ -90,6 +103,11 @@ public final class ShardsVelocityPlugin {
                 new PlayerReleaseHandler(this.playerDataService, this.logger),
                 new PlayerTransferHandler(this.playerDataService, this.shardPlacementService,
                     inFlightTransfers, this.proxyServer, this.logger),
+                new CargoSendHandler(cargoService, this.shardPlacementService, this.proxyServer, this.logger),
+                new CargoFetchHandler(cargoService, this.logger),
+                new CargoReserveHandler(cargoService, this.logger),
+                new CargoLandedHandler(cargoService, this.logger),
+                new CargoStatusHandler(cargoService, this.logger),
                 new BorderProbeHandler(this.shardPlacementService, this.proxyServer, this.logger),
                 new SkyStateHandler(skyService),
                 new NightSkipHandler(skyService, this.logger)),
@@ -98,8 +116,28 @@ public final class ShardsVelocityPlugin {
             this.logger.warn("Shards could not start its request consumer; no server can reach its player data");
         }
         startLockExpiry(shardsConfig);
+        startCargoPruning(cargoService);
         registerNetworkList(shardsConfig);
         startNetworkTabList(shardsConfig);
+    }
+
+    /**
+     * Forgets the rows of parcels that were landed long enough ago to be of no further interest.
+     *
+     * <p>Slow, and deliberately not a startup job: nothing depends on it having run, and a parcel
+     * still waiting is never touched by it however old it is.</p>
+     */
+    private void startCargoPruning(final CargoService cargoService) {
+        this.proxyServer.getScheduler().buildTask(this, () -> {
+            try {
+                final int pruned = cargoService.pruneLanded(CARGO_RETENTION);
+                if (pruned > 0) {
+                    this.logger.info("Forgot {} landed cargo rows", pruned);
+                }
+            } catch (final RuntimeException exception) {
+                this.logger.warn("Could not prune landed cargo", exception);
+            }
+        }).delay(CARGO_PRUNE_HOURS, TimeUnit.HOURS).repeat(CARGO_PRUNE_HOURS, TimeUnit.HOURS).schedule();
     }
 
     /**

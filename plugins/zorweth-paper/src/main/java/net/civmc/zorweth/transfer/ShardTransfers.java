@@ -3,6 +3,7 @@ package net.civmc.zorweth.transfer;
 import net.civmc.shards.api.PlayerLocation;
 import net.civmc.shards.paper.ShardsPaperPlugin;
 import net.civmc.shards.paper.border.TransferService;
+import net.civmc.shards.paper.cargo.CargoService;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
@@ -50,6 +51,21 @@ public final class ShardTransfers {
      */
     public static boolean toShard(final Player player, final String shardName) {
         return service().map(transfers -> transfers.transferToShard(player, shardName)).orElse(false);
+    }
+
+    /**
+     * Moving something no player is carrying - a rocket's hold.
+     *
+     * <p>Deliberately not the same thing as a transfer. A player's belongings are safe across a
+     * handover because they only ever exist on the player; a hold is blocks and chest contents in a
+     * world, really destroyed at one end and created at the other, and what this gives is the row
+     * that makes that pair of actions safe to interleave with a crash.</p>
+     */
+    public static java.util.Optional<CargoService> cargo() {
+        if (Bukkit.getPluginManager().getPlugin("Shards") instanceof ShardsPaperPlugin shards) {
+            return shards.getCargo();
+        }
+        return java.util.Optional.empty();
     }
 
     private static java.util.Optional<TransferService> service() {
