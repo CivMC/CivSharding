@@ -2,7 +2,6 @@ package net.civmc.shards.paper.border;
 
 import org.bukkit.Location;
 import org.bukkit.World;
-import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
 
 /**
@@ -44,22 +43,20 @@ public final class SafeLanding {
      */
     public static Location clearOf(final Player player) {
         final Location arrived = player.getLocation();
-        if (fits(arrived.getWorld(), arrived.getBlockX(), arrived.getBlockY(), arrived.getBlockZ())) {
+        if (fits(arrived.getWorld(), arrived.getX(), arrived.getY(), arrived.getZ())) {
             return null;
         }
         final World world = arrived.getWorld();
-        final int x = arrived.getBlockX();
-        final int z = arrived.getBlockZ();
         // Up first. Ground that has been built on has gained height rather than lost it, so the open
         // space is above far more often than below, and looking down first would drop somebody through
         // a floor into a cellar they were never headed for
         for (int step = 1; step <= SEARCH; step++) {
-            final int above = arrived.getBlockY() + step;
-            if (above + 1 <= world.getMaxHeight() && fits(world, x, above, z)) {
+            final double above = arrived.getBlockY() + step;
+            if (fits(world, arrived.getX(), above, arrived.getZ())) {
                 return standing(arrived, above);
             }
-            final int below = arrived.getBlockY() - step;
-            if (below >= world.getMinHeight() && fits(world, x, below, z)) {
+            final double below = arrived.getBlockY() - step;
+            if (fits(world, arrived.getX(), below, arrived.getZ())) {
                 return standing(arrived, below);
             }
         }
@@ -67,24 +64,25 @@ public final class SafeLanding {
     }
 
     /**
-     * Whether a player standing with their feet in this block has room for the rest of themselves.
+     * Whether a player standing here has room for the rest of themselves.
      *
-     * <p>Two blocks, because that is what a player is. Passability rather than solidity, so a crossing
-     * into water, a sign or tall grass is not treated as a crossing into stone.</p>
+     * <p>{@link StandingRoom} against the blocks that are really there, rather than two whole blocks
+     * asked whether they are passable. A slab, a bed, a carpet or a path block is not passable and is
+     * exactly what a player arriving normally is standing on, so the old test called an ordinary
+     * landing a suffocation and lifted them a block into the air for it.</p>
      */
-    private static boolean fits(final World world, final int x, final int y, final int z) {
-        if (y < world.getMinHeight() || y + 1 > world.getMaxHeight()) {
+    private static boolean fits(final World world, final double x, final double y, final double z) {
+        if (y < world.getMinHeight() || y + 2 > world.getMaxHeight()) {
             return false;
         }
-        final Block feet = world.getBlockAt(x, y, z);
-        final Block head = world.getBlockAt(x, y + 1, z);
-        return feet.isPassable() && head.isPassable();
+        return !StandingRoom.blocked(world, x, y, z,
+            (blockX, blockY, blockZ) -> world.getBlockAt(blockX, blockY, blockZ).getBlockData());
     }
 
     /**
      * The same spot at a new height, keeping where within the block they were and which way they face.
      */
-    private static Location standing(final Location arrived, final int y) {
+    private static Location standing(final Location arrived, final double y) {
         final Location clear = arrived.clone();
         clear.setY(y);
         return clear;

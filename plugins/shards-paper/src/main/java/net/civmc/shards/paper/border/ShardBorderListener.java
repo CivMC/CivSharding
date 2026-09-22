@@ -8,11 +8,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 import net.civmc.shards.api.TransferStatus;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.block.BlockState;
-import org.bukkit.block.data.BlockData;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Cancellable;
@@ -30,6 +30,7 @@ import org.bukkit.event.block.BlockFormEvent;
 import org.bukkit.event.block.BlockFromToEvent;
 import org.bukkit.event.block.BlockGrowEvent;
 import org.bukkit.event.block.BlockIgniteEvent;
+import org.bukkit.event.block.BlockMultiPlaceEvent;
 import org.bukkit.event.block.BlockPistonExtendEvent;
 import org.bukkit.event.block.BlockPistonRetractEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
@@ -49,6 +50,7 @@ import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.vehicle.VehicleMoveEvent;
+import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.event.world.StructureGrowEvent;
 import org.bukkit.util.Vector;
 
@@ -71,6 +73,7 @@ public final class ShardBorderListener implements Listener {
     // fires, short enough that being stuck does not read as the border being broken
     private static final long STUCK_AFTER_NANOS = TimeUnit.MILLISECONDS.toNanos(500L);
 
+    private final JavaPlugin plugin;
     private final ShardBorder border;
     private final TransferService transfers;
     private final BorderNotices notices;
@@ -81,9 +84,11 @@ public final class ShardBorderListener implements Listener {
     // Since when each player has been walking at a seam without getting over it
     private final Map<UUID, Long> pressing = new ConcurrentHashMap<>();
 
-    public ShardBorderListener(final ShardBorder border, final TransferService transfers,
-                               final BorderNotices notices, final BorderOutlook outlook,
-                               final FarSideBlocks farSide, final Logger logger) {
+    public ShardBorderListener(final JavaPlugin plugin, final ShardBorder border,
+                               final TransferService transfers, final BorderNotices notices,
+                               final BorderOutlook outlook, final FarSideBlocks farSide,
+                               final Logger logger) {
+        this.plugin = plugin;
         this.border = border;
         this.transfers = transfers;
         this.notices = notices;
@@ -278,21 +283,21 @@ public final class ShardBorderListener implements Listener {
     /**
      * Whether the shard that owns the far side has something standing where they would arrive.
      *
-     * <p>Two blocks, because that is what a player is, and passability rather than solidity so that
-     * crossing into water or long grass is not treated as crossing into stone. Unknown ground - a
-     * chunk this server has not read - is not solid: guessing that way would wall players in at a
-     * border they could cross a moment later.
+     * <p>The player's own body against the collision shapes over there, which is what
+     * {@link StandingRoom} exists to explain: whole blocks and material solidity refused an open
+     * door, a slab and a bed, all of which are things somebody walks through or stands on every day.
+     * Unknown ground - a chunk this server has not read - is not in the way: guessing that way would
+     * wall players in at a border they could cross a moment later.</p>
+     *
+     * <p>Only the columns the neighbour owns are asked about. The body is wider than the margin it
+     * arrives past the line by, so part of it is still over this shard's own ground - and this
+     * server's blocks there are already the ones the player has been walking against.</p>
      */
     private boolean farSideIsSolid(final Location target) {
-        final int feet = target.getBlockY();
-        final BlockData atFeet = this.farSide.at(target.getWorld(), target.getBlockX(), feet,
-            target.getBlockZ());
-        final BlockData atHead = this.farSide.at(target.getWorld(), target.getBlockX(), feet + 1,
-            target.getBlockZ());
-        if (atFeet == null || atHead == null) {
-            return false;
-        }
-        return atFeet.getMaterial().isSolid() || atHead.getMaterial().isSolid();
+        return StandingRoom.blocked(target.getWorld(), target.getX(), target.getY(), target.getZ(),
+            (x, y, z) -> this.border.isOutside(x, z)
+                ? this.farSide.at(target.getWorld(), x, y, z)
+                : null);
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
@@ -415,18 +420,81 @@ public final class ShardBorderListener implements Listener {
         entity.teleport(wasAt, PlayerTeleportEvent.TeleportCause.PLUGIN);
     }
 
+    /**
+     * A teleport that lands on another shard, which is a crossing with the walk left out.
+     *
+     * <p>This used to be a flat refusal, on the grounds that an ender pearl or a chorus fruit can put
+     * somebody past the edge with no move event covering the ground between. That is true and it is
+     * also every other way of arriving somewhere: a command, a warp, a pearl, a portal. Refusing them
+     * all meant that on a sharded network you could not teleport across a border at all - the
+     * destination was a place the server would not put you and said nothing about why.</p>
+     *
+     * <p>So it is handed over instead, to the same machinery a walk uses and with the same refusals:
+     * ground nobody owns turns them back and says so, and a shard that is not answering keeps them
+     * here. The teleport itself is still cancelled, because the player must not stand on a
+     * neighbour's ground even for the tick before the handover - that is the whole of
+     * {@link SeamCrossing}'s reason for existing.</p>
+     *
+     * <p>Started on the next tick rather than inside the event, as the respawn handover is, because a
+     * snapshot is read from a live player and reading one from inside a teleport that is being
+     * cancelled is asking for the half-moved version of them.</p>
+     *
+     * <p>Nothing is asked of {@link #walledOff} here. A teleport into a wall is a teleport into a
+     * wall, wherever it lands, and the destination lifts an arrival clear of what it is standing in -
+     * refusing on what the neighbour has there would make a border a place teleports mysteriously
+     * fail rather than a place they work.</p>
+     */
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onTeleport(final PlayerTeleportEvent event) {
-        // Ender pearls and chorus fruit can put a player past the edge without a move event ever
-        // covering the ground between
-        if (this.border.isOutside(event.getTo())) {
-            event.setCancelled(true);
+        if (!this.border.isOutside(event.getTo())) {
+            return;
         }
+        event.setCancelled(true);
+        final Player player = event.getPlayer();
+        if (this.transfers.isInTransit(player.getUniqueId())) {
+            return;
+        }
+        final Location target = event.getTo().clone();
+        if (refuseWithoutAsking(player, target)) {
+            return;
+        }
+        this.logger.info(player.getName() + " teleported to " + target.getBlockX() + ","
+            + target.getBlockY() + "," + target.getBlockZ() + ", which is another shard's ground, so "
+            + "they are being handed over instead");
+        Bukkit.getScheduler().runTask(this.plugin, () -> {
+            if (player.isOnline()) {
+                this.transfers.transferTo(player, target);
+            }
+        });
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onBlockPlace(final BlockPlaceEvent event) {
         cancelIfOutside(event.getBlock(), event);
+    }
+
+    /**
+     * The other halves of anything placed as more than one block.
+     *
+     * <p>A bed, a door, a tall flower - one placement, two blocks, and only one of them carried by
+     * {@link BlockPlaceEvent#getBlock()}. So a bed laid along the last row inside a shard had its foot
+     * checked, passed, and its head written onto the neighbour's ground, where the neighbour can
+     * neither see it nor break it. Every block the placement replaces is checked instead, and any one
+     * of them being over the line refuses the whole placement - half a bed is not a thing to leave
+     * somebody with.</p>
+     *
+     * <p>This fires in place of {@link #onBlockPlace} rather than as well as it: a multi-block
+     * placement is a {@code BlockPlaceEvent} too, so both handlers see it, and checking the block the
+     * other one checks costs nothing and keeps this one self-contained.</p>
+     */
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    public void onMultiBlockPlace(final BlockMultiPlaceEvent event) {
+        for (final BlockState placed : event.getReplacedBlockStates()) {
+            if (isOutside(placed)) {
+                event.setCancelled(true);
+                return;
+            }
+        }
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)

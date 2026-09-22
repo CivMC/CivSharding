@@ -131,7 +131,7 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             getLogger().info("No arrival title configured, so a crossing into this shard is unannounced");
         }
         getServer().getPluginManager().registerEvents(
-            new ShardBorderListener(this.border, this.transfers, notices, outlook,
+            new ShardBorderListener(this, this.border, this.transfers, notices, outlook,
                 // Read through the field rather than captured: the mirror is built after this, and
                 // may never be built at all, in which case the far side is simply not known
                 (world, x, y, z) -> this.mirror == null ? null : this.mirror.neighbourBlockAt(world, x, y, z),

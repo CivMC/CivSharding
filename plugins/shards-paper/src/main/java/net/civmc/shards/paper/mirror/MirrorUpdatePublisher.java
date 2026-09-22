@@ -13,9 +13,11 @@ import net.civmc.shards.paper.border.ShardBorder;
 import net.civmc.shards.paper.rabbitmq.ShardsClient;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockBurnEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
@@ -25,6 +27,7 @@ import org.bukkit.event.block.BlockFormEvent;
 import org.bukkit.event.block.BlockFromToEvent;
 import org.bukkit.event.block.BlockGrowEvent;
 import org.bukkit.event.block.BlockIgniteEvent;
+import org.bukkit.event.block.BlockMultiPlaceEvent;
 import org.bukkit.event.block.BlockPistonExtendEvent;
 import org.bukkit.event.block.BlockPistonRetractEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
@@ -37,6 +40,7 @@ import org.bukkit.event.entity.EntityChangeBlockEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.player.PlayerBucketEmptyEvent;
 import org.bukkit.event.player.PlayerBucketFillEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.world.StructureGrowEvent;
 
 /**
@@ -159,9 +163,50 @@ public final class MirrorUpdatePublisher implements Listener {
         changed(event.getBlock());
     }
 
+    /**
+     * Both halves of a bed, a door or a tall flower, rather than the one the event names.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onMultiPlace(final BlockMultiPlaceEvent event) {
+        for (final org.bukkit.block.BlockState state : event.getReplacedBlockStates()) {
+            changed(state.getBlock());
+        }
+    }
+
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBreak(final BlockBreakEvent event) {
         changed(event.getBlock());
+    }
+
+    /**
+     * A door swung open, a trapdoor dropped, a lever thrown, a gate pushed, a plate stepped on.
+     *
+     * <p>None of these is a block being placed or broken, so none of them was published at all, and a
+     * door at a seam stayed shut on the neighbour's screen for as long as the server ran - shut to
+     * their server as well, which is what decides whether they may walk through it. From the other
+     * shard the doorway simply did not open.</p>
+     *
+     * <p>The block above and below go with the clicked one, because half of what is toggled here is
+     * two blocks tall and only one of them is ever clicked. Nothing tries to work out whether the
+     * click changed anything: {@link #changed} records a position and the block is read at the end of
+     * the tick, so a click that did nothing publishes the block exactly as it already was, and a
+     * receiver comparing it against its own copy drops it.</p>
+     *
+     * <p>{@code PHYSICAL} as well as a right click, for pressure plates and tripwire - a plate at a
+     * seam is stood on rather than clicked.</p>
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInteract(final PlayerInteractEvent event) {
+        if (event.getAction() != Action.RIGHT_CLICK_BLOCK && event.getAction() != Action.PHYSICAL) {
+            return;
+        }
+        final Block clicked = event.getClickedBlock();
+        if (clicked == null) {
+            return;
+        }
+        changed(clicked);
+        changed(clicked.getRelative(BlockFace.UP));
+        changed(clicked.getRelative(BlockFace.DOWN));
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)

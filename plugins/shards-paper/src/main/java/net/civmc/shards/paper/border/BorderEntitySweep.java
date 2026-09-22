@@ -16,6 +16,7 @@ import org.bukkit.entity.Vehicle;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.ChunkUnloadEvent;
@@ -82,6 +83,30 @@ public final class BorderEntitySweep implements Listener {
             this.watching.computeIfAbsent(event.getWorld().getName(),
                 ignored -> ConcurrentHashMap.newKeySet()).add(packed(event.getChunk()));
         }
+    }
+
+    /**
+     * An item thrown down at the very edge, which lands past it without ever having been inside.
+     *
+     * <p>The sweep only puts back what it has seen on this side, and a dropped item is <em>spawned</em>
+     * where it lands: a player standing on the last block and facing the seam drops it a third of a
+     * block in front of themselves, which is over the line. So it was never inside, the sweep left it
+     * alone as one of the neighbour's, {@code UnownedEntityView} hid it and
+     * {@code UnownedTakingsListener} refused to let anybody pick it up. The item was simply gone, in
+     * the place where somebody had just been holding it - which is how it was reported: things
+     * dropped at the border edge cannot be picked up again.</p>
+     *
+     * <p>Put back at the player's own feet rather than nudged, because there is nothing to work out:
+     * it came out of their hand this tick and their feet are the nearest place this shard certainly
+     * owns.</p>
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDrop(final PlayerDropItemEvent event) {
+        if (!this.border.isConfigured() || !this.border.isOutside(event.getItemDrop().getLocation())) {
+            return;
+        }
+        event.getItemDrop().setVelocity(new Vector());
+        event.getItemDrop().teleport(event.getPlayer().getLocation(), PlayerTeleportEvent.TeleportCause.PLUGIN);
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
