@@ -59,6 +59,47 @@ public final class ShardBorder {
         return isOutside(blockX, blockZ);
     }
 
+    /**
+     * Every face of this shard's outline within {@code radius} blocks, nearest first.
+     *
+     * <p>A face is one block of ours with one block of somebody else's beside it, so this describes
+     * the border exactly as it really runs - round corners, along a notch where a chunk has been given
+     * to a neighbour, and with a stretch that can be crossed sitting next to one that cannot. That is
+     * the whole reason it is a list of faces rather than a line: a shard's outline is a rectilinear
+     * polygon, and no single straight edge, and no square, can stand in for one.</p>
+     *
+     * <p>Costs a containment test per block in the square around the player, so it is preceded by
+     * {@link #outlineWithin}, which costs a handful of comparisons and says no for everybody who is
+     * not actually near a border. Callers are expected to hold on to the answer until the player
+     * changes block: the outline does not move under them, only what lies beyond it does.</p>
+     *
+     * @param limit the most faces to return, nearest kept. A jagged outline can have a great many
+     *     within sight, and drawing every one of them is a packet each
+     */
+    public List<EdgeSighting> facesWithin(final int blockX, final int blockZ, final int radius, final int limit) {
+        if (!outlineWithin(blockX, blockZ, radius)) {
+            return List.of();
+        }
+        final List<EdgeSighting> faces = new ArrayList<>();
+        for (int x = blockX - radius; x <= blockX + radius; x++) {
+            for (int z = blockZ - radius; z <= blockZ + radius; z++) {
+                if (isOutside(x, z)) {
+                    // Only our own blocks have faces. Asking the same question from the other side
+                    // would draw the outline of ground we are not authoritative for
+                    continue;
+                }
+                for (final int[] step : STEPS) {
+                    if (isOutside(x + step[0], z + step[1])) {
+                        faces.add(new EdgeSighting(
+                            Math.max(Math.abs(x + step[0] - blockX), Math.abs(z + step[1] - blockZ)),
+                            x + step[0], z + step[1], step[0], step[1]));
+                    }
+                }
+            }
+        }
+        faces.sort(Comparator.comparingInt(EdgeSighting::distance));
+        return faces.size() <= limit ? List.copyOf(faces) : List.copyOf(faces.subList(0, limit));
+    }
 
     /**
      * Whether any of this server's areas has an edge running within {@code radius} blocks.

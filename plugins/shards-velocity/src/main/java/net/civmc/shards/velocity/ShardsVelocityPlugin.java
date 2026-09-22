@@ -23,9 +23,11 @@ import net.civmc.shards.velocity.playerdata.InFlightTransfers;
 import net.civmc.shards.velocity.playerdata.PlayerDataService;
 import net.civmc.shards.velocity.playerdata.ShardLockExpiry;
 import net.civmc.shards.velocity.rabbitmq.PlayerCheckpointHandler;
+import net.civmc.shards.velocity.rabbitmq.BorderProbeHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerClaimHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerReleaseHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerSaveHandler;
+import net.civmc.shards.velocity.rabbitmq.PlayerTransferHandler;
 import net.civmc.shards.velocity.rabbitmq.ServerStartupHandler;
 import net.civmc.shards.velocity.rabbitmq.ShardsRequestConsumer;
 import org.slf4j.Logger;
@@ -80,4 +82,11 @@ public final class ShardsVelocityPlugin {
         }
     }
 
+    /**
+     * Single-owner player data access for other plugins. Empty until this plugin has handled
+     * ProxyInitializeEvent.
+     */
+    public Optional<PlayerDataService> getPlayerData() {
+        return Optional.ofNullable(this.playerDataService);
+    }
 }
