@@ -7,11 +7,23 @@ import org.bukkit.ChatColor;
 
 public class ChatStrings {
 
-    public final static ChatRenderer localChatFormat = (source, sourceDisplayName, message, viewer) -> Component.empty()
-        .append(Component.text("<"))
-        .append(sourceDisplayName)
-        .append(Component.text("> "))
-        .append(message);
+    public final static ChatRenderer localChatFormat = (source, sourceDisplayName, message, viewer) ->
+        localChatLine(sourceDisplayName, message);
+
+    /**
+     * The same line, built without a sender who is on this server.
+     *
+     * <p>Local chat carries across a shard border, and the person who said it is then on another one -
+     * so there is no Player to hand a ChatRenderer. Both paths go through here so the two cannot end
+     * up looking different depending on which side of a seam you were standing on.</p>
+     */
+    public static Component localChatLine(Component sourceDisplayName, Component message) {
+        return Component.empty()
+            .append(Component.text("<"))
+            .append(sourceDisplayName)
+            .append(Component.text("> "))
+            .append(message);
+    }
 
     public final static String chatPlayerIsOffline = ChatColor.YELLOW + "That player is offline.";
 

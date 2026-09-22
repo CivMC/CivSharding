@@ -9,6 +9,8 @@ import net.civmc.shards.api.ServerStartupRequest;
 import net.civmc.shards.api.ServerStartupResponse;
 import net.civmc.shards.paper.border.ArrivalCue;
 import net.civmc.shards.api.ShardsRabbitMqTopology;
+import net.civmc.shards.api.chat.LocalChatRelay;
+import net.civmc.shards.api.chat.LocalChatSpeech;
 import net.civmc.shards.paper.border.BorderNotices;
 import net.civmc.shards.paper.border.BorderEntitySweep;
 import net.civmc.shards.paper.border.BorderOutlook;
@@ -22,6 +24,7 @@ import net.civmc.shards.paper.border.ShardBorderListener;
 import net.civmc.shards.paper.border.ShardRespawnListener;
 import net.civmc.shards.paper.border.TransferService;
 import net.civmc.shards.paper.cargo.CargoService;
+import net.civmc.shards.paper.chat.ShardLocalChat;
 import net.civmc.shards.paper.config.ShardsPaperConfig;
 import net.civmc.shards.paper.mirror.BorderBandSync;
 import net.civmc.shards.paper.mirror.BorderBandUpdates;
@@ -152,6 +155,7 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         // about what a player walks away with, and is not the operator's to turn off
         getServer().getPluginManager().registerEvents(new UnownedTakingsListener(this.border), this);
         startEntitySweep();
+        startLocalChat();
         startMirror(outlook);
         startPeriodicSave();
         startBorderView(this.view);
@@ -265,6 +269,23 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         getServer().getScheduler().runTaskTimer(this, () -> sweep.sweep(getServer().getWorlds()), 1L, 1L);
     }
 
+    /**
+     * Carries local chat over the borders, for whatever plugin owns chat here.
+     *
+     * <p>Registered as a service rather than wired to a chat plugin by name, so that neither knows
+     * about the other: this end decides only how a sentence reaches the shard next door, and the
+     * chat plugin keeps every decision about what local chat is. A server with no chat plugin
+     * looking for it simply publishes nothing, because nothing ever calls it.</p>
+     *
+     * <p>Registered during enable and before any dependent plugin's, which is what a soft dependency
+     * on this one buys them.</p>
+     */
+    private void startLocalChat() {
+        final ShardLocalChat chat = new ShardLocalChat(this, this.client, this.config.serverName());
+        this.client.subscribe(ShardsRabbitMqTopology.LOCAL_CHAT_EXCHANGE, LocalChatSpeech.class,
+            LocalChatSpeech::serverName, chat::receive);
+        getServer().getServicesManager().register(LocalChatRelay.class, chat, this, ServicePriority.Normal);
+    }
 
     /**
      * Shows what the neighbouring shards really have on the ground past the border.
@@ -277,6 +298,9 @@ public final class ShardsPaperPlugin extends JavaPlugin {
      */
     private void startMirror(final BorderOutlook outlook) {
         if (!this.config.mirrorChunks()) {
+            getLogger().warning("Not mirroring neighbouring shards: the ground past a border will be shown "
+                + "as this server's own untouched copy of it, which is the map as it was when the shards "
+                + "were split");
             return;
         }
         final MirrorMetrics metrics = new MirrorMetrics();
