@@ -526,6 +526,49 @@ public final class MirrorView implements Listener {
      * happens under a second. It also makes the saved file self-limiting: what is restored and then
      * never visited is dropped within the hour and is not written again.</p>
      */
+    /**
+     * What the shard that owns this block really has there, as far as this server has been told.
+     *
+     * <p>The mirror holds the <em>difference</em> from our own copy, so the neighbour's block is that
+     * difference where there is one and our own block where there is not - the same answer the client
+     * is being shown, arrived at the same way.</p>
+     *
+     * <p>Reading it to decide something is not the same as making it real. Nothing here enters the
+     * world: no block is placed and the answer is a decision rather than an object. What it is for is
+     * declining to send somebody into ground the neighbour has built on, which is this server
+     * refusing to act rather than acting on ground it does not own.</p>
+     *
+     * @return the neighbour's block, or null where this server has not read that chunk yet - which
+     *     means "not known" and never "nothing there"
+     */
+    public BlockData neighbourBlockAt(final World world, final int x, final int y, final int z) {
+        final Mirrored current = this.mirrored.get(new ChunkKey(world.getName(), x >> 4, z >> 4));
+        if (current == null) {
+            return null;
+        }
+        final BlockData differs = current.blocks().get(Position.block(x, y, z));
+        // Where the two copies agree there is no entry, and our own block is the neighbour's block
+        return differs != null ? differs : world.getBlockAt(x, y, z).getBlockData();
+    }
+
+    /**
+     * Drops what was worked out about one chunk, because the ground it was worked out against has
+     * moved.
+     *
+     * <p>The mirror holds a <em>difference</em> from this server's own copy, so it is only meaningful
+     * while that copy stands still. When the band sync writes a neighbour's blocks into our world,
+     * every difference held for that chunk is a difference from something that is no longer there -
+     * and drawing it would paint the old ground back over the new.
+     */
+    public void forgetChunk(final ChunkKey key) {
+        this.mirrored.remove(key);
+        this.lastNearby.remove(key);
+        for (final Set<ChunkKey> shownToSomebody : this.shown.values()) {
+            // Or the next pass counts it as already sent and never draws it again
+            shownToSomebody.remove(key);
+        }
+    }
+
     public void forgetWhatNobodyIsLookingAt() {
         final long now = System.nanoTime();
         int dropped = 0;
