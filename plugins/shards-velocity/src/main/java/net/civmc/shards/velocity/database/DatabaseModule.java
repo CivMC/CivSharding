@@ -50,6 +50,7 @@ public final class DatabaseModule extends AbstractModule {
         final Jdbi jdbi = Jdbi.create(dataSource).installPlugin(new SqlObjectPlugin());
         // Maps shard_player_data columns onto the PlayerDataRow record, owning_server -> owningServer
         jdbi.registerRowMapper(ConstructorMapper.factory(PlayerDataRow.class));
+        jdbi.registerRowMapper(ConstructorMapper.factory(CargoRow.class));
         // UUID columns are VARCHAR(36), so bind UUIDs as their string form
         jdbi.registerArgument(new AbstractArgumentFactory<UUID>(Types.VARCHAR) {
             @Override
