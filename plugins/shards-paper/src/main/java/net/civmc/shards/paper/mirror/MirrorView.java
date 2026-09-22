@@ -34,6 +34,7 @@ import net.civmc.shards.paper.rabbitmq.ShardsClient;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.ChunkSnapshot;
+import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.entity.Player;
@@ -74,6 +75,10 @@ public final class MirrorView implements Listener {
     // it is the only thing stopping one entry per chunk of border the server has ever had somebody
     // stand at, held for as long as it runs and written to disk every five minutes along with it
     private static final long KEEP_UNSEEN_FOR_NANOS = TimeUnit.HOURS.toNanos(1L);
+    // How many blocks coming apart at once are shown as coming apart. A wall being mined is a few a
+    // second; a stick of dynamite on a seam is a hundred in one message, and past this they simply
+    // disappear, which is what all of them used to do
+    private static final int MOST_BREAKS_SHOWN = 32;
 
     private final JavaPlugin plugin;
     private final ShardBorder border;
@@ -460,10 +465,19 @@ public final class MirrorView implements Listener {
         final List<MirroredSign> signs = update.signsDescribed() ? update.signs() : current.signs();
         final Map<Position, BlockData> blocks = new HashMap<>(current.blocks());
         final Map<Position, BlockData> send = new HashMap<>();
+        // Where a block has just come apart, and what it was. Gathered here and shown below, to the
+        // same people the change itself goes to
+        final Map<Position, BlockData> broken = new HashMap<>();
         for (final BlockUpdate block : update.updates()) {
             final Position position = Position.block(block.x(), block.y(), block.z());
             final BlockData theirs = Bukkit.createBlockData(block.blockData());
             final BlockData ours = world.getBlockAt(block.x(), block.y(), block.z()).getBlockData();
+            // What anybody watching was seeing until now: the difference they were shown where there
+            // was one, and this server's own block where the two copies agreed
+            final BlockData was = current.blocks().getOrDefault(position, ours);
+            if (broken.size() < MOST_BREAKS_SHOWN && BrokenBlocks.isABreak(was, theirs)) {
+                broken.put(position, was);
+            }
             if (theirs.equals(ours)) {
                 // The two copies agree here again, so there is nothing to draw - but anyone who was
                 // shown the old difference has to be told, which is what our own block does
@@ -487,6 +501,10 @@ public final class MirrorView implements Listener {
             }
             if (!send.isEmpty()) {
                 viewer.sendMultiBlockChange(send);
+            }
+            for (final Map.Entry<Position, BlockData> block : broken.entrySet()) {
+                BrokenBlocks.show(viewer, new Location(world, block.getKey().x(), block.getKey().y(),
+                    block.getKey().z()), block.getValue());
             }
             if (signsChanged) {
                 // All of them rather than the one that changed: the message carries the whole chunk's

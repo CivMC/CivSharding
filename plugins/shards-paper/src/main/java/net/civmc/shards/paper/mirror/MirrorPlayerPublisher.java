@@ -5,6 +5,7 @@ import com.destroystokyo.paper.SkinParts;
 import com.destroystokyo.paper.profile.ProfileProperty;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -17,9 +18,15 @@ import net.civmc.shards.paper.rabbitmq.ShardsClient;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerAnimationEvent;
+import org.bukkit.event.player.PlayerAnimationType;
 import org.bukkit.inventory.EntityEquipment;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.potion.PotionEffect;
 
 /**
  * Says where this shard's players are, for the shards that can see that ground.
@@ -32,11 +39,21 @@ import org.bukkit.inventory.ItemStack;
  * one - the next is along in a tick. That is why they are sent every tick with a short expiry and no
  * durability, and why a message that arrives late is simply replaced rather than applied.</p>
  *
+ * <p>What they are doing with themselves travels as the pose the game has already worked out, and a
+ * swing of the arm rides along on the tick it happened. Both used to be left out, which is why
+ * somebody mining or fighting across a border stood perfectly still while blocks came apart in front
+ * of them.</p>
+ *
+ * <p>What they are doing with themselves travels as the pose the game has already worked out, and a
+ * swing of the arm rides along on the tick it happened. Both used to be left out, which is why
+ * somebody mining or fighting across a border stood perfectly still while blocks came apart in front
+ * of them.</p>
+ *
  * <p>Only players near this shard's own outline. Somebody a thousand blocks from any border is
  * nobody's business but this server's, and a server with nobody near an edge announces nothing at
  * all.</p>
  */
-public final class MirrorPlayerPublisher {
+public final class MirrorPlayerPublisher implements Listener {
 
     // Their tracking range is 160 blocks, the widest of any entity, and this costs only bandwidth -
     // a receiver shows only the ones near its own players
@@ -54,6 +71,9 @@ public final class MirrorPlayerPublisher {
     // one expensive thing here and armour does not change from tick to tick, so it is done when the
     // items themselves differ rather than once a tick for everybody standing near a border
     private final Map<UUID, Worn> worn = new ConcurrentHashMap<>();
+    // Who has swung a hand since the last announcement went out, and which one. Emptied every tick
+    // whether or not anybody was near a border: a swing describes one tick and is worthless after it
+    private final Map<UUID, Integer> swung = new ConcurrentHashMap<>();
 
     public MirrorPlayerPublisher(final ShardBorder border, final ShardsClient client, final String serverName) {
         this.border = border;
@@ -78,9 +98,32 @@ public final class MirrorPlayerPublisher {
         }
         // Nobody near a border wears anything this has to remember
         this.worn.keySet().removeIf(uuid -> Bukkit.getPlayer(uuid) == null);
+        // Emptied here rather than as each player is described, because a swing by somebody nowhere
+        // near a border is written down too and would otherwise sit here until they logged out
+        this.swung.clear();
         for (final Map.Entry<String, List<MirrorPlayer>> world : byWorld.entrySet()) {
             this.client.publishPlayerPositions(
                 PlayerPositionMessage.create(this.serverName, world.getKey(), world.getValue()));
+        }
+    }
+
+    /**
+     * Notes a swing, to go out with this tick's announcement.
+     *
+     * <p>Kept rather than sent straight on, because a swing belongs to a position: the far side draws
+     * it on a ghost that exists only while these announcements keep arriving, and one sent on its own
+     * would have to arrive after a ghost had been made and before it expired. Riding along on the
+     * position it happened at costs nothing and cannot be out of order with it.</p>
+     *
+     * <p>Written down even for players nowhere near a border. Asking where somebody is standing costs
+     * more than writing down a number, and this is emptied every tick either way.</p>
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onSwing(final PlayerAnimationEvent event) {
+        if (event.getAnimationType() == PlayerAnimationType.ARM_SWING) {
+            this.swung.put(event.getPlayer().getUniqueId(), MirrorPlayer.MAIN_HAND);
+        } else if (event.getAnimationType() == PlayerAnimationType.OFF_ARM_SWING) {
+            this.swung.put(event.getPlayer().getUniqueId(), MirrorPlayer.OFF_HAND);
         }
     }
 
@@ -98,8 +141,28 @@ public final class MirrorPlayerPublisher {
         }
         return new MirrorPlayer(player.getUniqueId(), player.getName(), texture, signature,
             at.getX(), at.getY(), at.getZ(), at.getYaw(), at.getPitch(), player.getEyeLocation().getYaw(),
-            player.isSneaking(), player.isSwimming(), player.isGliding(), player.isOnGround(),
-            worn(player), skinParts(player));
+            player.getPose().name(), this.swung.getOrDefault(player.getUniqueId(), MirrorPlayer.NOT_SWINGING),
+            player.isOnGround(), worn(player), effects(player), skinParts(player));
+    }
+
+    /**
+     * The colours of the potions they are visibly under.
+     *
+     * <p>Only the ones with particles, so an effect whose swirls have been turned off stays turned
+     * off for everybody rather than only for the shard they are standing on.</p>
+     */
+    private static List<Integer> effects(final Player player) {
+        final Collection<PotionEffect> active = player.getActivePotionEffects();
+        if (active.isEmpty()) {
+            return List.of();
+        }
+        final List<Integer> colours = new ArrayList<>(active.size());
+        for (final PotionEffect effect : active) {
+            if (effect.hasParticles() && effect.getType().getColor() != null) {
+                colours.add(effect.getType().getColor().asRGB());
+            }
+        }
+        return colours;
     }
 
     /**

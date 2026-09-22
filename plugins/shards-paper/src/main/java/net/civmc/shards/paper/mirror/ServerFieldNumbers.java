@@ -76,6 +76,54 @@ final class ServerFieldNumbers {
         return numberOf(logger, "net.minecraft.world.entity.Entity", "DATA_POSE", "POSE");
     }
 
+    /**
+     * Which field says a camel is sitting down.
+     *
+     * <p>Not its pose, though a sitting camel has one. The client decides whether to draw a camel sat
+     * down from the <em>sign</em> of the tick its pose last changed on - negative means sitting - and
+     * animates the sitting down from how long ago that was. So a camel sent nothing but
+     * {@code SITTING} stands up perfectly straight on the far side, which is what it did.</p>
+     */
+    static OptionalInt camelPoseChange(final Logger logger) {
+        return numberOf(logger, "net.minecraft.world.entity.animal.camel.Camel",
+            "LAST_POSE_CHANGE_TICK", "LONG");
+    }
+
+    /**
+     * Which field says an animal is a baby, for everything that grows up.
+     */
+    static OptionalInt ageableBaby(final Logger logger) {
+        return numberOf(logger, "net.minecraft.world.entity.AgeableMob", "DATA_BABY_ID", "BOOLEAN");
+    }
+
+    /**
+     * The same for a zombie, which has a baby field of its own rather than growing up like an animal.
+     *
+     * <p>Two class names because the zombie moved house: it is under {@code monster.zombie} on this
+     * version and was directly under {@code monster} before. Asked for by name in turn, and the first
+     * one that answers is the answer.</p>
+     */
+    static OptionalInt zombieBaby(final Logger logger) {
+        final OptionalInt moved = numberOf(logger, "net.minecraft.world.entity.monster.zombie.Zombie",
+            "DATA_BABY_ID", "BOOLEAN");
+        if (moved.isPresent()) {
+            return moved;
+        }
+        return numberOf(logger, "net.minecraft.world.entity.monster.Zombie", "DATA_BABY_ID", "BOOLEAN");
+    }
+
+    /**
+     * Which field holds the swirls a living thing is giving off from the potions it is under.
+     *
+     * <p>They are not a particle anybody sends: the client draws them for itself from this list, one
+     * colour per visible effect, which is why a mirrored player under a potion gave off nothing at
+     * all however many particles the real one was surrounded by.</p>
+     */
+    static OptionalInt effectParticles(final Logger logger) {
+        return numberOf(logger, "net.minecraft.world.entity.LivingEntity", "DATA_EFFECT_PARTICLES",
+            "PARTICLES");
+    }
+
     private static OptionalInt numberOf(final Logger logger, final String className,
                                         final String fieldName, final String serializerName) {
         return READ.computeIfAbsent(className + '#' + fieldName,

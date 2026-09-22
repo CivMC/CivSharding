@@ -33,6 +33,7 @@ import net.civmc.shards.velocity.rabbitmq.CargoStatusHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerCheckpointHandler;
 import net.civmc.shards.velocity.rabbitmq.BorderProbeHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerClaimHandler;
+import net.civmc.shards.velocity.rabbitmq.PlayerLocateHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerReleaseHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerSaveHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerTransferHandler;
@@ -101,6 +102,7 @@ public final class ShardsVelocityPlugin {
                 new PlayerSaveHandler(this.playerDataService, this.logger),
                 new PlayerCheckpointHandler(this.playerDataService, this.logger),
                 new PlayerReleaseHandler(this.playerDataService, this.logger),
+                new PlayerLocateHandler(this.playerDataService, this.shardPlacementService, this.proxyServer),
                 new PlayerTransferHandler(this.playerDataService, this.shardPlacementService,
                     inFlightTransfers, this.proxyServer, this.logger),
                 new CargoSendHandler(cargoService, this.shardPlacementService, this.proxyServer, this.logger),

@@ -12,6 +12,7 @@ import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEn
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityTeleport;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSpawnEntity;
 import io.github.retrooper.packetevents.util.SpigotConversionUtil;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -22,7 +23,9 @@ import net.civmc.shards.api.MobPositionMessage;
 import net.civmc.shards.api.mirror.MirrorMob;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.entity.Camel;
 import org.bukkit.entity.EntityType;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -157,12 +160,16 @@ public final class MirrorMobView implements Listener, MirrorMobs {
             // wasteful
             dress(viewer, existing.entityId(), existing.equipment(), subject.equipment());
         }
-        if (!existing.item().equals(subject.item())) {
-            // A stack that grew when another was thrown onto it, or a different one entirely
+        if (!existing.item().equals(subject.item()) || !existing.pose().equals(subject.pose())
+            || existing.sitting() != subject.sitting() || existing.baby() != subject.baby()
+            || !existing.effects().equals(subject.effects())) {
+            // A stack that grew when another was thrown onto it, or a different one entirely - and a
+            // pose, which is the one thing here that a thing standing still can still change about
+            // itself
             describe(viewer, existing.entityId(), subject);
         }
         theirs.put(subject.uuid(), new Drawn(existing.entityId(), existing.type(), subject.equipment(),
-            subject.item()));
+            subject.item(), subject.pose(), subject.sitting(), subject.baby(), subject.effects()));
     }
 
     private void spawn(final Player viewer, final Map<UUID, Drawn> theirs, final MirrorMob subject) {
@@ -176,7 +183,8 @@ public final class MirrorMobView implements Listener, MirrorMobs {
             return;
         }
         final int entityId = FakeEntityIds.next();
-        theirs.put(subject.uuid(), new Drawn(entityId, bukkitType, subject.equipment(), subject.item()));
+        theirs.put(subject.uuid(), new Drawn(entityId, bukkitType, subject.equipment(), subject.item(),
+            subject.pose(), subject.sitting(), subject.baby(), subject.effects()));
         send(viewer, new WrapperPlayServerSpawnEntity(entityId,
             // A uuid of our own, never the owner's - see the class comment
             Optional.of(UUID.randomUUID()), type,
@@ -188,28 +196,64 @@ public final class MirrorMobView implements Listener, MirrorMobs {
     }
 
     /**
-     * Sends the stack a dropped item is, which is the whole of what a dropped item looks like.
+     * Sends the numbered fields that are carried: the stack a dropped item is, what the thing is
+     * doing with itself, whether it is a baby, whether a camel is sat down, and the swirls of any
+     * potion it is under.
      *
-     * <p>Nothing at all for everything else: a minecart and a cow have no item field, and the layout
-     * will not offer a number for one. Where it will not say, nothing is sent - a mirrored item lies
-     * on the ground invisible rather than the client being handed a likely-looking number, which is
-     * the rule the whole of {@link LearnedEntityDataLayout} exists to keep.</p>
+     * <p>Nothing else: a cow's colour and a boat's wood are numbered fields that cannot be
+     * identified by their type alone, and a guessed number is what once took every player on both
+     * shards offline. These two can be asked for - an entity has exactly one field holding an item,
+     * and a pose is declared on the base entity class - so these two are sent. Where the layout will
+     * not say, nothing is sent: a mirrored item lies on the ground invisible rather than the client
+     * being handed a likely-looking number, which is the rule the whole of
+     * {@link LearnedEntityDataLayout} exists to keep.</p>
      */
     private void describe(final Player viewer, final int entityId, final MirrorMob subject) {
-        if (this.layout == null || subject.item().isEmpty()) {
+        if (this.layout == null) {
             return;
         }
         final EntityType bukkitType = bukkitTypeOf(subject);
         if (bukkitType == null) {
             return;
         }
+        final List<EntityData<?>> described = new ArrayList<>(5);
+        carried(subject, bukkitType).ifPresent(described::add);
+        // Standing is not sent for something that has never been anything else: it is what a client
+        // draws an entity as anyway, and this runs for every thing in sight every time one moves
+        if (!subject.pose().isEmpty() && !"STANDING".equals(subject.pose())) {
+            this.layout.pose(Poses.of(subject.pose())).ifPresent(described::add);
+        }
+        this.layout.baby(bukkitType, subject.baby()).ifPresent(described::add);
+        if (isACamel(bukkitType)) {
+            // On this server's clock, not the owner's - see the layout. Camels only: the field is
+            // theirs alone, and a cat sitting keeps it somewhere else entirely
+            this.layout.camelSitting(subject.sitting(), viewer.getWorld().getGameTime())
+                .ifPresent(described::add);
+        }
+        if (isLiving(bukkitType)) {
+            // Only a living thing has this field. Sending it for a minecart would be sending a number
+            // that means something else there, which is the one mistake this whole arrangement is
+            // built to make impossible
+            this.layout.effectParticles(subject.effects()).ifPresent(described::add);
+        }
+        if (!described.isEmpty()) {
+            send(viewer, new WrapperPlayServerEntityMetadata(entityId, described));
+        }
+    }
+
+    /**
+     * The stack a dropped item is, ready to send. Empty for everything else, which has no item field
+     * for the layout to find.
+     */
+    private Optional<EntityData<?>> carried(final MirrorMob subject, final EntityType bukkitType) {
+        if (subject.item().isEmpty()) {
+            return Optional.empty();
+        }
         final org.bukkit.inventory.ItemStack item = MirrorEquipment.decode(subject.item());
         if (item == null) {
-            return;
+            return Optional.empty();
         }
-        final Optional<EntityData<?>> data = this.layout.itemData(bukkitType,
-            SpigotConversionUtil.fromBukkitItemStack(item));
-        data.ifPresent(one -> send(viewer, new WrapperPlayServerEntityMetadata(entityId, List.of(one))));
+        return this.layout.itemData(bukkitType, SpigotConversionUtil.fromBukkitItemStack(item));
     }
 
     private void dress(final Player viewer, final int entityId, final Map<String, String> was,
@@ -238,6 +282,19 @@ public final class MirrorMobView implements Listener, MirrorMobs {
     public void onQuit(final PlayerQuitEvent event) {
         // Nothing is sent: they have gone, and their client has forgotten everything anyway
         this.drawn.remove(event.getPlayer().getUniqueId());
+    }
+
+    /**
+     * By what the kind <em>is</em> rather than by name, so a husk of one counts as one.
+     */
+    private static boolean isACamel(final EntityType type) {
+        final Class<?> entityClass = type.getEntityClass();
+        return entityClass != null && Camel.class.isAssignableFrom(entityClass);
+    }
+
+    private static boolean isLiving(final EntityType type) {
+        final Class<?> entityClass = type.getEntityClass();
+        return entityClass != null && LivingEntity.class.isAssignableFrom(entityClass);
     }
 
     private static EntityType bukkitTypeOf(final MirrorMob subject) {
@@ -270,7 +327,13 @@ public final class MirrorMobView implements Listener, MirrorMobs {
      *     than teleported into the wrong shape
      * @param equipment what it was last drawn wearing, so a packet goes only when that changes
      * @param item the stack it was last drawn as, for the same reason
+     * @param pose what it was last drawn doing, so a fox that lies down is described again and one
+     *     that goes on lying there is not
+     * @param sitting whether it was last drawn sat down, for the same reason
+     * @param baby whether it was last drawn as a baby, for the same reason
+     * @param effects the potion colours it was last drawn giving off, for the same reason
      */
-    private record Drawn(int entityId, EntityType type, Map<String, String> equipment, String item) {
+    private record Drawn(int entityId, EntityType type, Map<String, String> equipment, String item,
+                         String pose, boolean sitting, boolean baby, List<Integer> effects) {
     }
 }

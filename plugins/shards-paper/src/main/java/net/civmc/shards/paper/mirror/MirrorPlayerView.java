@@ -7,6 +7,7 @@ import com.github.retrooper.packetevents.protocol.player.UserProfile;
 import com.github.retrooper.packetevents.util.Vector3d;
 import com.github.retrooper.packetevents.wrapper.PacketWrapper;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerDestroyEntities;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityAnimation;
 import com.github.retrooper.packetevents.protocol.entity.data.EntityData;
 import com.github.retrooper.packetevents.protocol.entity.pose.EntityPose;
 import com.github.retrooper.packetevents.protocol.player.Equipment;
@@ -145,16 +146,19 @@ public final class MirrorPlayerView implements Listener, MirrorPlayers {
         }
         if (existing == null) {
             spawn(viewer, theirs, subject);
+            swing(viewer, theirs.get(subject.uuid()), subject);
             return;
         }
         send(viewer, new WrapperPlayServerEntityTeleport(existing.entityId(),
             new Vector3d(subject.x(), subject.y(), subject.z()), subject.yaw(), subject.pitch(),
             subject.onGround()));
         send(viewer, new WrapperPlayServerEntityHeadLook(existing.entityId(), subject.headYaw()));
-        if (existing.skinParts() != subject.skinParts() || existing.pose() != poseOf(subject)) {
+        swing(viewer, existing, subject);
+        if (existing.skinParts() != subject.skinParts() || existing.pose() != poseOf(subject)
+            || !existing.effects().equals(subject.effects())) {
             describe(viewer, existing.entityId(), subject);
             theirs.put(subject.uuid(), new Ghost(existing.entityId(), existing.equipment(),
-                subject.skinParts(), poseOf(subject)));
+                subject.skinParts(), poseOf(subject), subject.effects()));
         }
         if (!existing.equipment().equals(subject.equipment())) {
             // Only what they have taken off or picked up. These messages carry the whole of it every
@@ -162,14 +166,14 @@ public final class MirrorPlayerView implements Listener, MirrorPlayers {
             // wasteful
             dress(viewer, existing.entityId(), existing.equipment(), subject.equipment());
             theirs.put(subject.uuid(), new Ghost(existing.entityId(), subject.equipment(),
-                subject.skinParts(), poseOf(subject)));
+                subject.skinParts(), poseOf(subject), subject.effects()));
         }
     }
 
     private void spawn(final Player viewer, final Map<UUID, Ghost> theirs, final MirrorPlayer subject) {
         final int entityId = FakeEntityIds.next();
         theirs.put(subject.uuid(), new Ghost(entityId, subject.equipment(), subject.skinParts(),
-            poseOf(subject)));
+            poseOf(subject), subject.effects()));
 
         // The profile is what gives them their skin and their name tag. Sent even though the proxy
         // already puts cross-shard players in the tab list, so this does not quietly break the day
@@ -193,39 +197,56 @@ public final class MirrorPlayerView implements Listener, MirrorPlayers {
     }
 
     /**
-     * Sends the two things about a person that are numbered fields rather than packets of their own:
-     * which layers of their skin to draw, and what they are doing with themselves.
+     * Sends the things about a person that are numbered fields rather than packets of their own:
+     * which layers of their skin to draw, what they are doing with themselves, and the swirls of
+     * whatever potions they are under.
      *
-     * <p>Both in one packet, and only the ones the server would say where to put. A field nobody can
+     * <p>All in one packet, and only the ones the server would say where to put. A field nobody can
      * give a number for is left out rather than filled in, which is the whole lesson of this class.</p>
+     *
+     * <p>The potion swirls are sent even when there are none, unlike the rest: an empty list is how a
+     * client is told the last one has worn off, and leaving it out would leave somebody sparkling for
+     * as long as they stood near the border.</p>
      */
     private void describe(final Player viewer, final int entityId, final MirrorPlayer subject) {
         if (this.layout == null) {
             return;
         }
-        final List<EntityData<?>> described = new ArrayList<>(2);
+        final List<EntityData<?>> described = new ArrayList<>(3);
         this.layout.skinLayers((byte) subject.skinParts()).ifPresent(described::add);
         this.layout.pose(poseOf(subject)).ifPresent(described::add);
+        this.layout.effectParticles(subject.effects()).ifPresent(described::add);
         if (!described.isEmpty()) {
             send(viewer, new WrapperPlayServerEntityMetadata(entityId, described));
         }
     }
 
     /**
-     * What they are doing with themselves, in the order the game itself settles them: gliding beats
-     * swimming, and swimming beats a crouch.
+     * Swings the arm they have just swung, if they swung one on the tick this describes.
+     *
+     * <p>The one thing here that is an event rather than a state, which is why it is sent every time
+     * it is mentioned rather than when it differs from what was drawn before: two swings in a row are
+     * two swings, not one that has not changed.</p>
+     */
+    private void swing(final Player viewer, final Ghost ghost, final MirrorPlayer subject) {
+        if (ghost == null || subject.swing() == MirrorPlayer.NOT_SWINGING) {
+            return;
+        }
+        send(viewer, new WrapperPlayServerEntityAnimation(ghost.entityId(),
+            subject.swing() == MirrorPlayer.OFF_HAND
+                ? WrapperPlayServerEntityAnimation.EntityAnimationType.SWING_OFF_HAND
+                : WrapperPlayServerEntityAnimation.EntityAnimationType.SWING_MAIN_ARM));
+    }
+
+    /**
+     * What they are doing with themselves, as their own server worked it out.
+     *
+     * <p>The whole pose rather than a guess assembled from three booleans, which is what this was:
+     * somebody asleep in a bed, dying, or using a riptide trident was drawn standing up. Anything
+     * this version has no name for comes out standing, which is what all of them used to be.</p>
      */
     private static EntityPose poseOf(final MirrorPlayer subject) {
-        if (subject.gliding()) {
-            return EntityPose.FALL_FLYING;
-        }
-        if (subject.swimming()) {
-            return EntityPose.SWIMMING;
-        }
-        if (subject.sneaking()) {
-            return EntityPose.CROUCHING;
-        }
-        return EntityPose.STANDING;
+        return Poses.of(subject.pose());
     }
 
     /**
@@ -305,7 +326,9 @@ public final class MirrorPlayerView implements Listener, MirrorPlayers {
      * @param equipment what this ghost was last drawn wearing, so a packet goes only when it changes
      * @param skinParts the layers it was last drawn with, for the same reason
      * @param pose what it was last drawn doing, for the same reason
+     * @param effects the potion colours it was last drawn giving off, for the same reason
      */
-    private record Ghost(int entityId, Map<String, String> equipment, int skinParts, EntityPose pose) {
+    private record Ghost(int entityId, Map<String, String> equipment, int skinParts, EntityPose pose,
+                         List<Integer> effects) {
     }
 }

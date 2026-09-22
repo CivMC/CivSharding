@@ -22,6 +22,17 @@ public final class ShardsRabbitMqTopology {
     public static final String PLAYER_CHECKPOINT_QUEUE = "shards.playerdata.checkpoint";
 
     /**
+     * Where a shard asks which shard a named player is on.
+     *
+     * <p>Beside the player data queues rather than among them because nothing is read or written:
+     * the answer comes from who is connected to the proxy, not from the store.</p>
+     */
+    public static final String PLAYER_LOCATE_QUEUE = "shards.playerdata.locate";
+    // Somebody typed a name and is waiting to see what happens. One still sitting here seconds later
+    // is answering a question its asker has already given up on
+    public static final int PLAYER_LOCATE_TTL_MILLIS = 10_000;
+
+    /**
      * Where things that are not a player are handed from one shard to another.
      *
      * <p>Apart from the player queues because a parcel outlives the request that moved it. A player
@@ -116,6 +127,18 @@ public final class ShardsRabbitMqTopology {
     public static final int MIRROR_MOB_TTL_MILLIS = 100;
 
     /**
+     * Where a shard announces the particles it has just shown.
+     *
+     * <p>Its own exchange again, and the one carrying events rather than state: a position is replaced
+     * by the next one, a puff of smoke is not. A receiver that misses one has missed it.</p>
+     */
+    public static final String MIRROR_PARTICLE_EXCHANGE = "shards.mirror.particles";
+    // Longer than a position's two ticks, because a burst is not replaced by a later one and a
+    // slightly late puff of smoke is still smoke. Short all the same: one that arrives a second late
+    // is smoke from something that finished happening
+    public static final int MIRROR_PARTICLE_TTL_MILLIS = 1_000;
+
+    /**
      * Where a shard announces what its players have just said in local chat.
      *
      * <p>A fanout like the rest of the mirror, and for the same reason: who can hear a sentence
@@ -128,6 +151,18 @@ public final class ShardsRabbitMqTopology {
     // they walked up. A late line of chat is worse than a lost one: it reads as somebody talking to
     // themselves
     public static final int LOCAL_CHAT_TTL_MILLIS = 5_000;
+
+    /**
+     * Where a shard asks whoever has a player to send them somewhere.
+     *
+     * <p>A fanout for the same reason the rest of the mirror is one: which shard somebody is on is
+     * only known at the moment it is asked, and a message addressed to the answer would be addressed
+     * to where they were. Every shard hears it and the one that has them acts.</p>
+     */
+    public static final String PLAYER_SUMMON_EXCHANGE = "shards.player.summon";
+    // Somebody typed a command and is watching. A summons that has been sitting in a queue is one
+    // whose asker has given up, and acting on it would move a player for no visible reason
+    public static final int PLAYER_SUMMON_TTL_MILLIS = 10_000;
 
     public static final String REPLY_QUEUE_PREFIX = "shards.replies.";
 

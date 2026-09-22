@@ -57,15 +57,39 @@ public final class PlayerDataService {
                 result = new ClaimResult.NewPlayer();
             } else {
                 final PlayerDataRow row = existing.get();
-                if (row.owningServerUuid() != null) {
-                    result = new ClaimResult.HeldBy(row.owningServerUuid());
+                final UUID owner = row.owningServerUuid();
+                if (owner != null && !owner.equals(serverUuid)) {
+                    result = new ClaimResult.HeldBy(owner);
                 } else {
-                    statements.claim(playerUuid, serverUuid);
+                    // An owner equal to the asking server is that server's own lock, left by a login
+                    // that was allowed and then died before the player arrived - another plugin
+                    // refusing them at pre-login, or a client that gave up. Refusing a server its own
+                    // lock would keep the player out until that server's abandoned-login timeout
+                    // fires, which is a timer they are racing on every reconnect. It is handed
+                    // straight back instead: holding the lock is exactly the right to read this
+                    // payload, and the row is already theirs, so there is nothing to take
+                    if (owner == null) {
+                        statements.claim(playerUuid, serverUuid);
+                    }
                     result = new ClaimResult.Loaded(row.payload(), row.location());
                 }
             }
             return result;
         });
+    }
+
+    /**
+     * Where a player was when their data was last written back.
+     *
+     * <p>Reads a row without touching its lock, so it is safe to ask about somebody who is playing
+     * right now - which is the only time anybody asks. It is as old as their last checkpoint, so it
+     * says roughly where they are and never exactly.</p>
+     *
+     * @return empty when there is no row, or one that has never been written back
+     */
+    public Optional<PlayerLocation> storedLocation(final UUID playerUuid) {
+        return this.jdbi.withExtension(PlayerDataStatements.class,
+            statements -> statements.select(playerUuid)).map(PlayerDataRow::location);
     }
 
     /**

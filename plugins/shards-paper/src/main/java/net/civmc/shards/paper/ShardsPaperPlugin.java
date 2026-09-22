@@ -4,6 +4,8 @@ import java.util.Optional;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
+import net.civmc.shards.api.ParticleMessage;
+import net.civmc.shards.api.PlayerSummonMessage;
 import net.civmc.shards.api.ServerStartupRequest;
 import net.civmc.shards.api.ServerStartupResponse;
 import net.civmc.shards.paper.border.ArrivalCue;
@@ -16,6 +18,7 @@ import net.civmc.shards.paper.border.BorderOutlook;
 import net.civmc.shards.paper.border.BorderRenderer;
 import net.civmc.shards.paper.border.BorderView;
 import net.civmc.shards.paper.border.GlassBorderRenderer;
+import net.civmc.shards.paper.border.MarkerBorderRenderer;
 import net.civmc.shards.paper.border.ParticleBorderRenderer;
 import net.civmc.shards.paper.border.ShardBorder;
 import net.civmc.shards.paper.border.ShardBorderListener;
@@ -27,6 +30,9 @@ import net.civmc.shards.paper.config.ShardsPaperConfig;
 import net.civmc.shards.paper.mirror.BorderBandSync;
 import net.civmc.shards.paper.mirror.BorderBandUpdates;
 import net.civmc.shards.paper.mirror.MirrorMobPublisher;
+import net.civmc.shards.paper.mirror.MirrorParticlePublisher;
+import net.civmc.shards.paper.mirror.MirrorParticleView;
+import net.civmc.shards.paper.mirror.MirrorParticles;
 import net.civmc.shards.paper.mirror.MirrorMobView;
 import net.civmc.shards.paper.mirror.MirrorMobs;
 import net.civmc.shards.paper.mirror.ChunkRevisions;
@@ -50,6 +56,10 @@ import net.civmc.shards.paper.mirror.UnownedGroundListener;
 import net.civmc.shards.paper.mirror.UnownedTakingsListener;
 import net.civmc.shards.paper.playerdata.OwnedPlayers;
 import net.civmc.shards.paper.playerdata.PlayerDataListener;
+import net.civmc.shards.paper.teleport.FollowingSomebody;
+import net.civmc.shards.paper.teleport.NetworkTeleport;
+import net.civmc.shards.paper.teleport.NetworkTeleportListener;
+import net.civmc.shards.paper.teleport.Summons;
 import net.civmc.shards.paper.rabbitmq.ShardsClient;
 import net.civmc.shards.paper.rabbitmq.ShardsServer;
 import net.civmc.shards.paper.sky.SkyListener;
@@ -143,6 +153,15 @@ public final class ShardsPaperPlugin extends JavaPlugin {
                 getLogger()), this);
         getServer().getPluginManager().registerEvents(
             new ShardRespawnListener(this, this.border, this.transfers, getLogger()), this);
+        final FollowingSomebody following = new FollowingSomebody(this);
+        getServer().getPluginManager().registerEvents(
+            new NetworkTeleportListener(this, new NetworkTeleport(this, this.client, this.transfers,
+                following, this.config.serverName(), getLogger()), following, getLogger()), this);
+        // The other half of it: moving somebody who is not here cannot be done from here, so it is
+        // asked of every shard and answered by the one that has them
+        final Summons summons = new Summons(this, this.border, this.transfers, following, getLogger());
+        this.client.subscribe(ShardsRabbitMqTopology.PLAYER_SUMMON_EXCHANGE, PlayerSummonMessage.class,
+            PlayerSummonMessage::serverName, summons::receive);
         getCommand("shardsnapshot").setExecutor(new SnapshotVerifyCommand());
         startSkySync();
         startUnownedEntityView();
@@ -194,6 +213,7 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         return switch (this.config.borderStyle()) {
             case PARTICLES -> new ParticleBorderRenderer();
             case GLASS -> new GlassBorderRenderer(this);
+            case MARKERS -> new MarkerBorderRenderer(this);
         };
     }
 
@@ -308,6 +328,9 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         // Everything else that moves: a minecart on a rail beside a seam, a farm's animals, a dropped
         // item. The last of what a border was still missing once the buildings and the people were on
         final MirrorMobs mobs = startMobMirror();
+        // And every sign of anything happening: the dust off a pick, a brewing stand's bubbles, an
+        // explosion. All of it is particles, and all of it is one channel
+        final MirrorParticles particles = startParticleMirror();
         // As far as the client renders, which is what has to look right. The neighbour's own view
         // distance does not come into it - it is this server's players who are looking
         final MirrorView mirror = new MirrorView(this, this.border, outlook, this.client,
@@ -369,6 +392,9 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         // whether or not this server can show anybody: a neighbour may be able to even if we cannot
         final MirrorPlayerPublisher playerPublisher = new MirrorPlayerPublisher(this.border, this.client,
             this.config.serverName());
+        // A listener as well as a timer: a swing of the arm is an event, and it goes out with the
+        // position sent on the tick it happened
+        getServer().getPluginManager().registerEvents(playerPublisher, this);
         getServer().getScheduler().runTaskTimer(this, playerPublisher::publish, 1L, 1L);
         getServer().getScheduler().runTaskTimer(this, players::expire, 20L, 20L);
 
@@ -380,6 +406,20 @@ public final class ShardsPaperPlugin extends JavaPlugin {
                 this.config.serverName(), getLogger());
             getServer().getScheduler().runTaskTimer(this, mobPublisher::publish, 1L, 1L);
             getServer().getScheduler().runTaskTimer(this, mobs::expire, 20L, 20L);
+        }
+
+        // And the particles, on the same tick. Announced only while this server can also draw a
+        // neighbour's, because both halves need the packet library and a shard that announces bursts
+        // nobody near it can draw is paying for a picture it cannot see
+        if (particles != MirrorParticles.NONE) {
+            final MirrorParticlePublisher particlePublisher = new MirrorParticlePublisher(this.border,
+                this.client, this.config.serverName(), getLogger());
+            particlePublisher.watch();
+            getServer().getScheduler().runTaskTimer(this, particlePublisher::publish, 1L, 1L);
+            this.client.subscribe(ShardsRabbitMqTopology.MIRROR_PARTICLE_EXCHANGE, ParticleMessage.class,
+                ParticleMessage::serverName,
+                // Arrives on a broker thread, and drawing reads the players
+                message -> getServer().getScheduler().runTask(this, () -> particles.apply(message)));
         }
         getServer().getScheduler().runTaskTimer(this, () -> {
             for (final Player player : Bukkit.getOnlinePlayers()) {
@@ -496,6 +536,30 @@ public final class ShardsPaperPlugin extends JavaPlugin {
                 + "moves on other shards will not be drawn. Everything else about the mirror is "
                 + "unaffected", exception);
             return MirrorMobs.NONE;
+        }
+    }
+
+    /**
+     * Starts drawing what happens on a neighbouring shard, which is almost entirely particles.
+     *
+     * <p>Its own switch on the packet library, like the frames, the players and the mobs, and its own
+     * quiet fallback: a shard that cannot draw a neighbour's dust still draws their buildings, their
+     * animals and the people standing among them.</p>
+     */
+    private MirrorParticles startParticleMirror() {
+        final Plugin packetEvents = getServer().getPluginManager().getPlugin("packetevents");
+        if (packetEvents == null || !packetEvents.isEnabled()) {
+            getLogger().info("PacketEvents is not installed, so the particles on other shards will not "
+                + "be drawn. Everything else about the mirror works without it");
+            return MirrorParticles.NONE;
+        }
+        try {
+            return new MirrorParticleView();
+        } catch (final RuntimeException | LinkageError exception) {
+            getLogger().log(Level.SEVERE, "PacketEvents is installed but could not be used, so the "
+                + "particles on other shards will not be drawn. Everything else about the mirror is "
+                + "unaffected", exception);
+            return MirrorParticles.NONE;
         }
     }
 

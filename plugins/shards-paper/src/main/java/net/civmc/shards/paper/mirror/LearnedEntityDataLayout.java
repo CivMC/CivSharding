@@ -8,12 +8,17 @@ import com.github.retrooper.packetevents.protocol.entity.data.EntityDataType;
 import com.github.retrooper.packetevents.protocol.entity.data.EntityDataTypes;
 import com.github.retrooper.packetevents.protocol.entity.pose.EntityPose;
 import com.github.retrooper.packetevents.protocol.item.ItemStack;
+import com.github.retrooper.packetevents.protocol.particle.Particle;
+import com.github.retrooper.packetevents.protocol.particle.data.ParticleColorData;
+import com.github.retrooper.packetevents.protocol.particle.type.ParticleTypes;
 import com.github.retrooper.packetevents.protocol.packettype.PacketType;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityMetadata;
 import io.github.retrooper.packetevents.util.SpigotReflectionUtil;
 import java.util.EnumMap;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -23,9 +28,11 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.logging.Logger;
 import org.bukkit.Bukkit;
+import org.bukkit.entity.Ageable;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Zombie;
 
 /**
  * Reads the metadata field numbers off this server's own entities, instead of hardcoding them.
@@ -67,6 +74,10 @@ public final class LearnedEntityDataLayout extends PacketListenerAbstract implem
     private static final int CONFIDENT_AFTER = 4;
     // A backlog can only grow on a server busy enough to settle every question in seconds anyway
     private static final int PENDING_CAP = 512;
+    // Longer than a camel takes to sit down or stand up, so one drawn from this is drawn settled
+    private static final int SETTLED_AFTER_TICKS = 100;
+    private static final int OPAQUE = 0xFF000000;
+    private static final int RGB = 0x00FFFFFF;
 
     private final Logger logger;
 
@@ -200,6 +211,86 @@ public final class LearnedEntityDataLayout extends PacketListenerAbstract implem
             return Optional.empty();
         }
         return Optional.of(new EntityData(watched.getAsInt(), EntityDataTypes.ENTITY_POSE, pose));
+    }
+
+    /**
+     * Whether this thing is a baby, ready to send, for the kinds that can be one.
+     *
+     * <p>Two fields with the same meaning and different numbers: everything that grows up has one on
+     * {@code AgeableMob}, and a zombie has its own. Which of them applies is decided by what kind of
+     * entity this is, because sending one kind's number to the other is the protocol error that all
+     * of this is arranged to avoid.</p>
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public Optional<EntityData<?>> baby(final EntityType type, final boolean baby) {
+        final OptionalInt index = babyIndex(type);
+        if (index.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(new EntityData(index.getAsInt(), EntityDataTypes.BOOLEAN, baby));
+    }
+
+    private OptionalInt babyIndex(final EntityType type) {
+        final Class<?> entityClass = type.getEntityClass();
+        if (entityClass == null) {
+            return OptionalInt.empty();
+        }
+        if (Ageable.class.isAssignableFrom(entityClass)) {
+            return ServerFieldNumbers.ageableBaby(this.logger);
+        }
+        if (Zombie.class.isAssignableFrom(entityClass)) {
+            return ServerFieldNumbers.zombieBaby(this.logger);
+        }
+        return OptionalInt.empty();
+    }
+
+    /**
+     * Whether a camel is sitting down, ready to send.
+     *
+     * <p>Sent as the tick its pose last changed on, because that is what the field is: the client
+     * reads a negative number as sitting and the size of it as how long ago, which is what it
+     * animates from. A moment ago on <em>this</em> server's clock rather than the owner's - the two
+     * have been running for different lengths of time, and a tick number from the other one would be
+     * in this server's future or far enough in its past to mean nothing.</p>
+     *
+     * @param onTick this world's current game time
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public Optional<EntityData<?>> camelSitting(final boolean sitting, final long onTick) {
+        final OptionalInt index = ServerFieldNumbers.camelPoseChange(this.logger);
+        if (index.isEmpty()) {
+            return Optional.empty();
+        }
+        // Long enough ago that the sitting down or standing up has finished, and never zero, which
+        // would be read as standing however it was meant
+        final long changedAt = Math.max(1L, onTick - SETTLED_AFTER_TICKS);
+        return Optional.of(new EntityData(index.getAsInt(), EntityDataTypes.LONG,
+            sitting ? -changedAt : changedAt));
+    }
+
+    /**
+     * The swirls a living thing gives off from the potions it is under, ready to send.
+     *
+     * <p>One entry per visible effect, in the colour that effect is. Nobody sends these as particles:
+     * the client makes them for itself out of this list, which is why a mirrored player under a
+     * potion gave off nothing at all.</p>
+     *
+     * @param colours the effects' colours, as packed RGB
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public Optional<EntityData<?>> effectParticles(final List<Integer> colours) {
+        final OptionalInt index = ServerFieldNumbers.effectParticles(this.logger);
+        if (index.isEmpty()) {
+            return Optional.empty();
+        }
+        final List<Particle<?>> swirls = new ArrayList<>(colours.size());
+        for (final int colour : colours) {
+            // Opaque: the alpha carries how strongly the swirl is drawn, and an effect that is being
+            // shown at all is being shown
+            swirls.add(new Particle<>(ParticleTypes.ENTITY_EFFECT,
+                new ParticleColorData(OPAQUE | colour & RGB)));
+        }
+        return Optional.of(new EntityData(index.getAsInt(), EntityDataTypes.PARTICLES, swirls));
     }
 
     /**

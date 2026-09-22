@@ -46,14 +46,19 @@ public record ShardsPaperConfig(String serverName, String failureMessage, int sa
     /**
      * What the border is drawn with.
      *
-     * <p>Two of them because they fail in opposite directions, and which matters depends on the
-     * server: particles cost nothing and put nothing in the world, but a client set to minimal
-     * particles sees no border at all; glass renders whatever that setting says, at the price of
-     * being entities other plugins can see.</p>
+     * <p>They fail in opposite directions, and which matters depends on the server: particles cost
+     * nothing and put nothing in the world, but a client set to minimal particles sees no border at
+     * all; the two that use display entities render whatever that setting says, at the price of being
+     * entities other plugins can see.</p>
+     *
+     * <p>Glass and markers differ in what they say rather than in how they are drawn. A continuous
+     * wall of panes is legible from anywhere but reads as something that stops you, which is wrong
+     * about most borders; markers read as a line surveyed on the ground, which is what one is.</p>
      */
     public enum BorderStyle {
         PARTICLES,
-        GLASS
+        GLASS,
+        MARKERS
     }
 
     public ShardsPaperConfig {
@@ -113,7 +118,7 @@ public record ShardsPaperConfig(String serverName, String failureMessage, int sa
         try {
             return BorderStyle.valueOf(configured.trim().toUpperCase(Locale.ROOT));
         } catch (final IllegalArgumentException exception) {
-            throw new IllegalArgumentException("border-style must be one of particles, glass - not "
+            throw new IllegalArgumentException("border-style must be one of particles, glass, markers - not "
                 + configured);
         }
     }

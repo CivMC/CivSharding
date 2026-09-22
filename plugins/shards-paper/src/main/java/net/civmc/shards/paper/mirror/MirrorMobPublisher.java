@@ -1,6 +1,8 @@
 package net.civmc.shards.paper.mirror;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -13,6 +15,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.entity.Ageable;
 import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.Display;
 import org.bukkit.entity.Entity;
@@ -20,7 +23,10 @@ import org.bukkit.entity.Hanging;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Sittable;
+import org.bukkit.entity.Zombie;
 import org.bukkit.inventory.EntityEquipment;
+import org.bukkit.potion.PotionEffect;
 
 /**
  * Says where this shard's minecarts, animals and dropped items are, for the shards that can see that
@@ -36,12 +42,27 @@ import org.bukkit.inventory.EntityEquipment;
  * in {@link MirrorPlayerPublisher}: the latest state rather than a change, so nothing is missed by
  * dropping one, and no need to know which neighbour is looking.</p>
  *
+ * <p><strong>Nearest the border first, when there is too much of it.</strong> There is a cap on how
+ * much of this one shard will describe in a tick, and what used to decide which things made it was
+ * the order the server happened to list its loaded chunks in. That order is not stable, so a rail
+ * yard a hundred blocks back could take the whole allowance one tick and none of it the next, and the
+ * cows at the seam - the only ones anybody can actually see - flickered in and out for reasons
+ * nothing could explain from the far side. The chunks are put in order of how close they are to this
+ * shard's own outline instead, so what is dropped is whatever is furthest from any border and
+ * therefore least likely to be in shot.</p>
+ *
  * <p><strong>Only what this shard owns.</strong> Near its own outline, and standing on ground inside
  * it. The second half is the one that is easy to leave out and cannot be: this server's world does
  * not stop at its border, so it has cows of its own wandering a neighbour's fields - ones that
  * neighbour cannot see and that this server's own players are not shown either, because
  * {@code hide-unowned-entities} hides them. Announcing those would put this server's private herd
  * inside somebody's town, which is the exact fault that setting exists to fix, sent over the wire.</p>
+ *
+ * <p>What it is doing with itself goes too, as the name of its pose: a camel sitting down, a fox
+ * asleep, a frog with its tongue out. That one field is carried where the rest of an entity's
+ * metadata is not, because a pose is declared on the base entity class and so can be looked up by the
+ * receiver on its own version rather than guessed - see {@code LearnedEntityDataLayout} for why
+ * everything else stays absent.</p>
  *
  * <p><strong>What is deliberately not described.</strong> Players, which have machinery of their own
  * that carries a skin and a name. Frames and stands, which do not move and travel with their chunk.
@@ -66,8 +87,9 @@ public final class MirrorMobPublisher {
     private final ShardsClient client;
     private final String serverName;
     private final Logger logger;
-    // Which chunks have a border near enough to matter, worked out once each
-    private final Map<Long, Boolean> nearABorder = new HashMap<>();
+    // How far each chunk is from this shard's outline, worked out once each. Doubles as the answer
+    // to whether it is near one at all: anything past the publishing radius is nobody's business
+    private final Map<Long, Integer> outlineDistances = new HashMap<>();
     private long lastWarnedAt;
 
     public MirrorMobPublisher(final ShardBorder border, final ShardsClient client, final String serverName,
@@ -91,10 +113,7 @@ public final class MirrorMobPublisher {
             // The loaded chunks near a border rather than every entity in the world. A world's entity
             // list is every mob on the shard, and walking it sixty times a second to find the handful
             // beside a seam is most of the cost of this feature for none of its value
-            for (final Chunk chunk : world.getLoadedChunks()) {
-                if (!nearTheOutline(chunk)) {
-                    continue;
-                }
+            for (final Chunk chunk : nearestTheOutline(world)) {
                 for (final Entity entity : chunk.getEntities()) {
                     if (!worthSending(entity)) {
                         continue;
@@ -120,16 +139,27 @@ public final class MirrorMobPublisher {
     }
 
     /**
-     * Whether a chunk is close enough to a border for anything in it to be visible from another shard.
+     * The loaded chunks close enough to a border to be worth describing, nearest one first.
      *
-     * <p>Remembered rather than worked out again every tick. The shard map does not change while the
-     * network is up, so a chunk's answer never does - and the alternative is an outline test for every
-     * loaded chunk in the world, sixty times a second.</p>
+     * <p>Sorted every tick because which chunks are loaded changes; how far each one is from the
+     * outline does not, and is remembered. The shard map does not change while the network is up, so
+     * a chunk's distance never does - and working it out again for every loaded chunk in the world
+     * sixty times a second is the one part of this that would cost anything.</p>
      */
-    private boolean nearTheOutline(final Chunk chunk) {
-        return this.nearABorder.computeIfAbsent(packed(chunk.getX(), chunk.getZ()),
-            ignored -> this.border.outlineWithin((chunk.getX() << 4) + 8, (chunk.getZ() << 4) + 8,
-                PUBLISH_RADIUS));
+    private List<Chunk> nearestTheOutline(final World world) {
+        final List<Chunk> near = new ArrayList<>();
+        for (final Chunk chunk : world.getLoadedChunks()) {
+            if (fromTheOutline(chunk) <= PUBLISH_RADIUS) {
+                near.add(chunk);
+            }
+        }
+        near.sort(Comparator.comparingInt(this::fromTheOutline));
+        return near;
+    }
+
+    private int fromTheOutline(final Chunk chunk) {
+        return this.outlineDistances.computeIfAbsent(packed(chunk.getX(), chunk.getZ()),
+            ignored -> this.border.distanceToOutline((chunk.getX() << 4) + 8, (chunk.getZ() << 4) + 8));
     }
 
     private static long packed(final int chunkX, final int chunkZ) {
@@ -159,7 +189,8 @@ public final class MirrorMobPublisher {
         final Location at = entity.getLocation();
         return new MirrorMob(entity.getUniqueId(), entity.getType().name(), at.getX(), at.getY(),
             at.getZ(), at.getYaw(), at.getPitch(), headYaw(entity, at), entity.isOnGround(),
-            worn(entity), carried(entity));
+            worn(entity), carried(entity), entity.getPose().name(), sitting(entity), baby(entity),
+            effects(entity));
     }
 
     /**
@@ -198,6 +229,48 @@ public final class MirrorMobPublisher {
         return entity instanceof Item item ? StillEntities.encode(item.getItemStack()) : "";
     }
 
+    /**
+     * Whether it is sat down. Only a few kinds can be, and each of them keeps it somewhere of its
+     * own; what is drawn from this on the far side is only what can be drawn there.
+     */
+    private static boolean sitting(final Entity entity) {
+        return entity instanceof Sittable sittable && sittable.isSitting();
+    }
+
+    /**
+     * Whether it is a baby, asked of the two different things that can be one: an animal that grows
+     * up, and a zombie, which does not.
+     */
+    private static boolean baby(final Entity entity) {
+        if (entity instanceof Ageable ageable) {
+            return !ageable.isAdult();
+        }
+        return entity instanceof Zombie zombie && zombie.isBaby();
+    }
+
+    /**
+     * The colours of the potions it is visibly under.
+     *
+     * <p>Only the ones with particles: an effect somebody has asked not to see the swirls of is one
+     * nobody should see the swirls of, here least of all.</p>
+     */
+    private static List<Integer> effects(final Entity entity) {
+        if (!(entity instanceof LivingEntity living)) {
+            return List.of();
+        }
+        final Collection<PotionEffect> active = living.getActivePotionEffects();
+        if (active.isEmpty()) {
+            return List.of();
+        }
+        final List<Integer> colours = new ArrayList<>(active.size());
+        for (final PotionEffect effect : active) {
+            if (effect.hasParticles() && effect.getType().getColor() != null) {
+                colours.add(effect.getType().getColor().asRGB());
+            }
+        }
+        return colours;
+    }
+
     private void warnAboutTooMany(final World world) {
         final long now = System.nanoTime();
         if (now - this.lastWarnedAt < WARN_EVERY_NANOS) {
@@ -205,7 +278,7 @@ public final class MirrorMobPublisher {
         }
         this.lastWarnedAt = now;
         this.logger.warning("More than " + MOST_PER_WORLD + " moving things near a border in "
-            + world.getName() + ", so the neighbouring shards are being shown some of them and not "
-            + "all. A mob farm or a rail yard on a seam is the usual reason");
+            + world.getName() + ", so the neighbouring shards are being shown the ones nearest a "
+            + "border and not all of them. A mob farm or a rail yard on a seam is the usual reason");
     }
 }

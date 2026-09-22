@@ -146,6 +146,10 @@ border-band-chunks: 2
 #   glass      a pane of stained glass per face, blue where a crossing will work and red where it
 #              will not. These are display entities, so they render whatever the particle setting
 #              says - but they are real entities in the world, and other plugins can see them.
+#   markers    the same colours as a line surveyed on the ground: an ankle-high strip along the
+#              seam with a stake standing every four blocks. Display entities again, and it says
+#              something different from the glass - a wall of panes reads as a thing that stops
+#              you, which is wrong about a border most people can walk straight through.
 #
 # Neither is guaranteed to be drawn: entity render distance is a client setting too. The only thing
 # that always renders is blocks actually placed in the world, which is not something this will ever do.

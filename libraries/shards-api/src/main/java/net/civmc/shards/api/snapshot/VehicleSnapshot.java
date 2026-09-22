@@ -1,5 +1,6 @@
 package net.civmc.shards.api.snapshot;
 
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -18,11 +19,20 @@ import java.util.Objects;
  * beyond these fields. A vehicle that cannot be described this way is better left behind than
  * recreated wrong.</p>
  *
+ * <p>What it is <em>wearing</em> is carried separately from what it holds, because the game keeps the
+ * two separately: a happy ghast's harness and a horse's saddle are equipment, not inventory, and a
+ * vehicle described by its inventory alone crossed a border stripped of them.</p>
+ *
  * @param type the {@code EntityType} name
  * @param customName the legacy-formatted name, null if unnamed
  * @param inventory base64 of the vehicle's own contents, null if it holds nothing - a chest minecart's
  *     cargo, or a horse's saddle and armour
  * @param ownerUuid the taming owner, null if untamed or not tameable
+ * @param equipment what the vehicle is wearing, by {@code EquipmentSlot} name, each one Base64 of the
+ *     server's own item bytes. Not the same thing as its {@code inventory}: a happy ghast's harness
+ *     and a horse's saddle are worn in an equipment slot rather than held in a container, so a
+ *     vehicle described by its inventory alone arrived stripped of both. Null on a payload written
+ *     before this was carried
  * @param velocityX how the vehicle was already moving, so a minecart at speed arrives at speed. Null
  *     on a payload written before this was carried, which reads as a vehicle that was standing still -
  *     the same thing every rebuilt vehicle used to be
@@ -45,10 +55,14 @@ public record VehicleSnapshot(
     Integer age,
     Double velocityX,
     Double velocityY,
-    Double velocityZ
+    Double velocityZ,
+    Map<String, String> equipment
 ) {
 
     public VehicleSnapshot {
         Objects.requireNonNull(type, "type");
+        // Left null rather than emptied, so "written before this was carried" and "wearing nothing"
+        // stay tellable apart in a payload
+        equipment = equipment == null ? null : Map.copyOf(equipment);
     }
 }

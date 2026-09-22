@@ -71,15 +71,6 @@ public final class GlassBorderRenderer implements BorderRenderer {
     // without the overlap the border comes apart into a staircase with a gap at every step
     private static final float HEIGHT = 4.0F;
     private static final int SUNK = 1;
-    // How far above the player a pane will look for open space before giving up on the face, and how
-    // far below it will follow that space down to a floor
-    private static final int OPEN_ABOVE = 4;
-    private static final int FLOOR_BELOW = 8;
-    // A pane stands on the floor while the player is within this much of it. Higher than that - up a
-    // pillar, or flying - the floor is not where they are looking, so the pane comes up to meet them,
-    // in steps of FOLLOW_STEP so that climbing does not re-place every pane on every block
-    private static final int FOLLOW_ABOVE = 3;
-    private static final int FOLLOW_STEP = 3;
     // What the client uses to decide the pane is off screen. Left at the entity's own size, a pane
     // scaled well past it is culled while plainly in view
     private static final float CULLING_WIDTH = 2.0F;
@@ -204,62 +195,20 @@ public final class GlassBorderRenderer implements BorderRenderer {
     /**
      * Where a pane at this column should stand.
      *
-     * <p>Found by looking for the open space the player themselves is in and following its floor
-     * down, rather than by asking for the highest block. The highest block is wrong three ways over:
-     * it counts water, so a border across a lake stood on the surface and disappeared the moment you
-     * swam under it; it counts leaves, so one under a tree hung at canopy height; and it looks from
-     * the sky, so in a cave or a building it reported the hillside or the roof overhead and the pane
-     * was placed in the ceiling. Clamping the result back towards the player then buried the panes it
-     * had put too high, and left the rest hanging at whatever height the player happened to be.</p>
+     * <p>The floor is found by {@link BorderFooting}, which looks out from the player's own level
+     * rather than down from the sky - that is what puts the border on the lake bed instead of the
+     * lake, on the cave floor instead of the hillside overhead, and on the ground under a tree
+     * instead of in its canopy.</p>
      *
-     * <p>Water and air are both open here, so the search comes to rest on the lake bed rather than on
-     * the lake, and a border crossing one is drawn where somebody swimming can see it.</p>
-     *
-     * <p>Where the column is solid all the way up - a border running into a hillside, or through a
-     * wall somebody has built on it - the pane stands at the player's own level instead. It is inside
-     * rock there and invisible as glass, which is exactly the case the glow is for.</p>
-     *
-     * <p>And where the floor is a long way down, because the player is up a pillar or flying, the
-     * pane comes up to meet them rather than staying on the ground. A border is a thing you are about
-     * to cross, so it belongs where you are about to cross it; left on the floor it hung several
-     * blocks below anybody in the air, which is both useless and the wrong answer about where the
-     * border is.</p>
+     * <p>Where the column is solid all the way up the pane stands at the player's own level instead.
+     * It is inside rock there and invisible as glass, which is exactly the case the glow is for.</p>
      */
     private static int baseUnder(final World world, final int x, final int z, final int playerY) {
-        final int ceiling = Math.min(world.getMaxHeight() - 1, playerY + OPEN_ABOVE);
-        int open = Integer.MIN_VALUE;
-        for (int y = Math.max(playerY, world.getMinHeight()); y <= ceiling; y++) {
-            if (!world.getBlockAt(x, y, z).getType().isSolid()) {
-                open = y;
-                break;
-            }
-        }
-        if (open == Integer.MIN_VALUE) {
+        final int floor = BorderFooting.floorUnder(world, x, z, playerY);
+        if (floor == BorderFooting.SOLID) {
             return playerY - SUNK;
         }
-        final int lowest = Math.max(world.getMinHeight(), playerY - FLOOR_BELOW);
-        int floor = open;
-        while (floor > lowest && !world.getBlockAt(x, floor - 1, z).getType().isSolid()) {
-            floor--;
-        }
-        return follow(floor - SUNK, playerY);
-    }
-
-    /**
-     * Lifts a pane off the floor once the player is well above it.
-     *
-     * <p>In steps rather than continuously. Following exactly would mean every pane in sight being
-     * taken down and raised again on every block of a climb, and a jump would do it too - the step is
-     * what makes a pane that already covers the player be left alone.</p>
-     */
-    private static int follow(final int floorBase, final int playerY) {
-        final int above = playerY - floorBase;
-        if (above <= FOLLOW_ABOVE) {
-            return floorBase;
-        }
-        // Snapped against the floor rather than against the player, so two players at slightly
-        // different heights over the same ground are shown the pane in the same place
-        return floorBase + Math.floorDiv(above, FOLLOW_STEP) * FOLLOW_STEP;
+        return BorderFooting.follow(floor - SUNK, playerY);
     }
 
     private BlockDisplay raise(final Player player, final World world, final Pane pane,

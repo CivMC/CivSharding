@@ -1,6 +1,8 @@
 package net.civmc.shards.paper.snapshot;
 
 import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 import net.civmc.shards.api.snapshot.VehicleSnapshot;
 import org.bukkit.Bukkit;
@@ -15,6 +17,8 @@ import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Steerable;
 import org.bukkit.entity.Tameable;
+import org.bukkit.inventory.EntityEquipment;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.util.Vector;
@@ -27,6 +31,10 @@ import org.bukkit.util.Vector;
  * the whole risk in this class - a vehicle rebuilt before the original is gone is a duplicated horse,
  * and horses are worth duplicating. {@link #remove} is therefore called before the handover is sent,
  * and {@link #restore} only ever runs from a payload the destination was given.</p>
+ *
+ * <p>Anything about it that is not described is lost, which is why what it <em>wears</em> is carried as
+ * well as what it holds: a happy ghast's harness is equipment rather than inventory, and a ghast
+ * rebuilt from its inventory alone crossed the border bare.</p>
  */
 public final class Vehicles {
 
@@ -62,7 +70,8 @@ public final class Vehicles {
             // motion is the truth rather than the last thing anybody told it
             vehicle.getVelocity().getX(),
             vehicle.getVelocity().getY(),
-            vehicle.getVelocity().getZ());
+            vehicle.getVelocity().getZ(),
+            captureEquipment(vehicle));
     }
 
     /**
@@ -180,6 +189,71 @@ public final class Vehicles {
                 org.bukkit.attribute.Attribute.MAX_HEALTH).getValue()));
         }
         restoreInventory(vehicle, snapshot);
+        restoreEquipment(vehicle, snapshot);
+    }
+
+    /**
+     * What the vehicle is wearing: a happy ghast's harness, a horse's saddle and armour, the carpet on
+     * a llama.
+     *
+     * <p>Separate from its inventory because the game keeps the two separately, and a vehicle
+     * described by its inventory alone arrived naked. Read by slot name rather than by a fixed list,
+     * so a slot this version does not have is simply not in the answer and one it gains later needs
+     * nothing here.</p>
+     *
+     * @return null when there is nothing worn, which is what a payload from before this said
+     */
+    private static Map<String, String> captureEquipment(final Entity vehicle) {
+        if (!(vehicle instanceof LivingEntity living)) {
+            return null;
+        }
+        final EntityEquipment equipment = living.getEquipment();
+        if (equipment == null) {
+            return null;
+        }
+        final Map<String, String> worn = new LinkedHashMap<>();
+        for (final EquipmentSlot slot : EquipmentSlot.values()) {
+            final ItemStack item = itemIn(equipment, slot);
+            if (item != null && !item.getType().isAir()) {
+                worn.put(slot.name(), Base64.getEncoder().encodeToString(item.serializeAsBytes()));
+            }
+        }
+        return worn.isEmpty() ? null : worn;
+    }
+
+    private static ItemStack itemIn(final EntityEquipment equipment, final EquipmentSlot slot) {
+        try {
+            return equipment.getItem(slot);
+        } catch (final IllegalArgumentException notASlotThisHas) {
+            return null;
+        }
+    }
+
+    /**
+     * Puts back on what it was wearing.
+     *
+     * <p>Silently, so a ghast does not arrive with the clank of a harness being fitted: nothing has
+     * just been put on it, it is being rebuilt as it already was. A slot or an item this version
+     * cannot make is skipped rather than failing the rest - losing a harness is better than losing
+     * the saddle as well.</p>
+     */
+    private static void restoreEquipment(final Entity vehicle, final VehicleSnapshot snapshot) {
+        if (snapshot.equipment() == null || !(vehicle instanceof LivingEntity living)) {
+            return;
+        }
+        final EntityEquipment equipment = living.getEquipment();
+        if (equipment == null) {
+            return;
+        }
+        for (final Map.Entry<String, String> worn : snapshot.equipment().entrySet()) {
+            try {
+                equipment.setItem(EquipmentSlot.valueOf(worn.getKey()),
+                    ItemStack.deserializeBytes(Base64.getDecoder().decode(worn.getValue())), true);
+            } catch (final IllegalArgumentException cannotWearIt) {
+                // A slot this version does not have, or bytes it cannot read. The rest still goes on
+                continue;
+            }
+        }
     }
 
     private static String captureInventory(final Entity vehicle) {

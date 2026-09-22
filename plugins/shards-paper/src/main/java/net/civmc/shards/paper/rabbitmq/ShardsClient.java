@@ -41,6 +41,7 @@ import net.civmc.shards.api.ChunkStateRequest;
 import net.civmc.shards.api.chat.LocalChatSpeech;
 import net.civmc.shards.api.ChunkUpdateMessage;
 import net.civmc.shards.api.MobPositionMessage;
+import net.civmc.shards.api.ParticleMessage;
 import net.civmc.shards.api.PlayerPositionMessage;
 import net.civmc.shards.api.ChunkStateResponse;
 import net.civmc.shards.api.NightSkipRequest;
@@ -50,9 +51,12 @@ import net.civmc.shards.api.PlayerCheckpointRequest;
 import net.civmc.shards.api.PlayerCheckpointResponse;
 import net.civmc.shards.api.PlayerClaimRequest;
 import net.civmc.shards.api.PlayerClaimResponse;
+import net.civmc.shards.api.PlayerLocateRequest;
+import net.civmc.shards.api.PlayerLocateResponse;
 import net.civmc.shards.api.PlayerReleaseRequest;
 import net.civmc.shards.api.PlayerReleaseResponse;
 import net.civmc.shards.api.PlayerSaveRequest;
+import net.civmc.shards.api.PlayerSummonMessage;
 import net.civmc.shards.api.PlayerSaveResponse;
 import net.civmc.shards.api.PlayerTransferRequest;
 import net.civmc.shards.api.PlayerTransferResponse;
@@ -213,6 +217,15 @@ public final class ShardsClient implements AutoCloseable {
             PlayerCheckpointResponse.class);
     }
 
+    /**
+     * Asks which shard a named player is on. Reads nothing and locks nothing, so asking about
+     * somebody cannot disturb them.
+     */
+    public CompletableFuture<PlayerLocateResponse> locate(final PlayerLocateRequest request) {
+        return publish(ShardsRabbitMqTopology.PLAYER_LOCATE_QUEUE, request.requestId(), request,
+            PlayerLocateResponse.class);
+    }
+
     public CompletableFuture<PlayerTransferResponse> transfer(final PlayerTransferRequest request) {
         return publish(ShardsRabbitMqTopology.PLAYER_TRANSFER_QUEUE, request.requestId(), request,
             PlayerTransferResponse.class);
@@ -316,6 +329,29 @@ public final class ShardsClient implements AutoCloseable {
     public void publishMirrorUpdate(final ChunkUpdateMessage update) {
         announce(ShardsRabbitMqTopology.MIRROR_UPDATE_EXCHANGE, update,
             ShardsRabbitMqTopology.MIRROR_UPDATE_TTL_MILLIS);
+    }
+
+    /**
+     * Announces the particles this shard has just shown, to every shard at once.
+     *
+     * <p>Fire and forget with a short life: a burst that arrives late is a puff of smoke from
+     * something that has finished happening.</p>
+     */
+    public void publishParticles(final ParticleMessage particles) {
+        announce(ShardsRabbitMqTopology.MIRROR_PARTICLE_EXCHANGE, particles,
+            ShardsRabbitMqTopology.MIRROR_PARTICLE_TTL_MILLIS);
+    }
+
+    /**
+     * Asks whichever shard has a player to send them somewhere.
+     *
+     * <p>Fire and forget, like the rest of the fanouts: the shard that has them acts on it, and every
+     * other one finds it is not about anybody here. Nothing answers, because the answer is that the
+     * player moves.</p>
+     */
+    public void publishSummon(final PlayerSummonMessage summons) {
+        announce(ShardsRabbitMqTopology.PLAYER_SUMMON_EXCHANGE, summons,
+            ShardsRabbitMqTopology.PLAYER_SUMMON_TTL_MILLIS);
     }
 
     /**

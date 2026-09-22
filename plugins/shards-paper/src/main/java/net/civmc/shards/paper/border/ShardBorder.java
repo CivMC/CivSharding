@@ -116,20 +116,32 @@ public final class ShardBorder {
      * edge with no face on it - which costs one wasted scan and never a missing border.</p>
      */
     public boolean outlineWithin(final int blockX, final int blockZ, final int radius) {
-        for (final ShardRegion region : this.regions.get()) {
-            final List<ShardPoint> corners = region.vertices();
-            for (int index = 0; index < corners.size(); index++) {
-                if (edgeWithin(corners.get(index), corners.get((index + 1) % corners.size()),
-                    blockX, blockZ, radius)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        return distanceToOutline(blockX, blockZ) <= radius;
     }
 
     /**
-     * Whether one edge of an area passes within {@code radius} blocks.
+     * How far this block is from the nearest edge of this shard's outline, in blocks.
+     *
+     * <p>The same measurement {@link #outlineWithin} answers yes or no about, for the callers that
+     * have to put one place before another rather than merely include it. Costs the same handful of
+     * comparisons per edge wherever it is asked.</p>
+     *
+     * @return {@link Integer#MAX_VALUE} for a server with no areas, which has no outline to be near
+     */
+    public int distanceToOutline(final int blockX, final int blockZ) {
+        int nearest = Integer.MAX_VALUE;
+        for (final ShardRegion region : this.regions.get()) {
+            final List<ShardPoint> corners = region.vertices();
+            for (int index = 0; index < corners.size(); index++) {
+                nearest = Math.min(nearest, edgeDistance(corners.get(index),
+                    corners.get((index + 1) % corners.size()), blockX, blockZ));
+            }
+        }
+        return nearest;
+    }
+
+    /**
+     * How far one edge of an area passes from a block.
      *
      * <p>Corners sit on the grid lines between blocks, so an edge at coordinate {@code c} separates
      * the blocks {@code c - 1} and {@code c}: the nearer of those two is what the distance is
@@ -137,8 +149,8 @@ public final class ShardBorder {
      * either end it is the distance to the last block the edge actually runs beside - the upper end
      * exclusive, matching the rule that decides ownership.</p>
      */
-    private static boolean edgeWithin(final ShardPoint from, final ShardPoint to, final int blockX,
-                                      final int blockZ, final int radius) {
+    private static int edgeDistance(final ShardPoint from, final ShardPoint to, final int blockX,
+                                    final int blockZ) {
         final boolean runsAlongZ = from.x() == to.x();
         final int across = runsAlongZ ? from.x() : from.z();
         final int alongLow = Math.min(runsAlongZ ? from.z() : from.x(), runsAlongZ ? to.z() : to.x());
@@ -155,7 +167,7 @@ public final class ShardBorder {
         } else {
             distanceAlong = 0;
         }
-        return Math.max(distanceAcross, distanceAlong) <= radius;
+        return Math.max(distanceAcross, distanceAlong);
     }
 
     /**
