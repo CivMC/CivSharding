@@ -3,6 +3,8 @@ package net.civmc.shards.api;
 import java.util.List;
 import java.util.Objects;
 import net.civmc.shards.api.mirror.BlockUpdate;
+import net.civmc.shards.api.mirror.MirroredEntity;
+import net.civmc.shards.api.mirror.MirroredSign;
 
 /**
  * Blocks that have just changed on one shard, told to everybody rather than asked for.
@@ -24,12 +26,28 @@ import net.civmc.shards.api.mirror.BlockUpdate;
  * not follow on from the last one means the chunk is read again in full - nothing here is ever
  * replayed, so this is a counter and not a log.</p>
  *
+ * <p>Entities that stay still - frames and stands - are announced as <strong>the whole of what the
+ * chunk has</strong>, not as a list of what changed. There are a handful per chunk against sixteen
+ * thousand blocks a section, so describing all of them costs less than working out which one somebody
+ * touched, and it means a removal needs no message of its own: something absent from the list is gone.
+ * {@code entitiesDescribed} says whether this message speaks about them at all, because an
+ * announcement about blocks must not be read as saying there are no frames.</p>
+ *
  * @param publisherId which run of the sending server numbered this. A viewer that sees it change knows
  *     the numbering has restarted, rather than reading the numbers as having run backwards
- * @param revision how many changes to this chunk this server has announced, this one included
+ * @param revision how many changes to this chunk this server has announced, this one included. Blocks
+ *     and entities share the one count, so a missed announcement of either is noticed the same way
+ * <p>Signs are announced the same way and for the same reasons: the whole chunk's worth of them,
+ * with {@code signsDescribed} saying whether this message speaks about them at all. A sign is a block
+ * and arrives as one, but what it <em>says</em> is not part of the block and travels here.</p>
+ *
+ * @param entitiesDescribed whether {@code entities} is this chunk's entities or merely empty
+ * @param signsDescribed the same for {@code signs}
  */
 public record ChunkUpdateMessage(String serverName, String world, int chunkX, int chunkZ,
                                  List<BlockUpdate> updates, String publisherId, long revision,
+                                 boolean entitiesDescribed, List<MirroredEntity> entities,
+                                 boolean signsDescribed, List<MirroredSign> signs,
                                  long createdAtEpochMillis) {
 
     public ChunkUpdateMessage {
@@ -39,13 +57,41 @@ public record ChunkUpdateMessage(String serverName, String world, int chunkX, in
         updates = List.copyOf(updates);
         publisherId = Messages.requireNonBlank(publisherId, "publisherId");
         Messages.requirePositive(revision, "revision");
+        entities = entities == null ? List.of() : List.copyOf(entities);
+        signs = signs == null ? List.of() : List.copyOf(signs);
         Messages.requirePositive(createdAtEpochMillis, "createdAtEpochMillis");
     }
 
-    public static ChunkUpdateMessage create(final String serverName, final String world, final int chunkX,
+    /**
+     * Blocks that have changed, saying nothing about the chunk's entities.
+     */
+    public static ChunkUpdateMessage blocks(final String serverName, final String world, final int chunkX,
                                             final int chunkZ, final List<BlockUpdate> updates,
                                             final String publisherId, final long revision) {
         return new ChunkUpdateMessage(serverName, world, chunkX, chunkZ, updates, publisherId, revision,
-            System.currentTimeMillis());
+            false, List.of(), false, List.of(), System.currentTimeMillis());
+    }
+
+    /**
+     * Every still entity the chunk has, saying nothing about its blocks. An empty list means it has
+     * none, which is how the last one being broken is announced.
+     */
+    public static ChunkUpdateMessage entities(final String serverName, final String world,
+                                              final int chunkX, final int chunkZ,
+                                              final List<MirroredEntity> entities,
+                                              final String publisherId, final long revision) {
+        return new ChunkUpdateMessage(serverName, world, chunkX, chunkZ, List.of(), publisherId, revision,
+            true, entities, false, List.of(), System.currentTimeMillis());
+    }
+
+    /**
+     * Everything the chunk's signs say, saying nothing about its blocks or its entities. An empty list
+     * means it has no signs, which is how the last one being broken is announced.
+     */
+    public static ChunkUpdateMessage signs(final String serverName, final String world, final int chunkX,
+                                           final int chunkZ, final List<MirroredSign> signs,
+                                           final String publisherId, final long revision) {
+        return new ChunkUpdateMessage(serverName, world, chunkX, chunkZ, List.of(), publisherId, revision,
+            false, List.of(), true, signs, System.currentTimeMillis());
     }
 }

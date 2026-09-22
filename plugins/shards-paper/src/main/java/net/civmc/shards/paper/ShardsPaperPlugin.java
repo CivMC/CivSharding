@@ -20,12 +20,18 @@ import net.civmc.shards.paper.border.ShardRespawnListener;
 import net.civmc.shards.paper.border.TransferService;
 import net.civmc.shards.paper.config.ShardsPaperConfig;
 import net.civmc.shards.paper.mirror.ChunkRevisions;
+import net.civmc.shards.paper.mirror.EntityDataLayout;
+import net.civmc.shards.paper.mirror.LearnedEntityDataLayout;
 import net.civmc.shards.paper.mirror.ChunkStateProvider;
+import net.civmc.shards.paper.mirror.MirrorEntities;
+import net.civmc.shards.paper.mirror.MirrorEntityPublisher;
+import net.civmc.shards.paper.mirror.MirrorEntityView;
 import net.civmc.shards.paper.mirror.MirrorMetrics;
 import net.civmc.shards.paper.mirror.MirrorPlayerPublisher;
 import net.civmc.shards.paper.mirror.MirrorPlayerView;
 import net.civmc.shards.paper.mirror.MirrorPlayers;
 import net.civmc.shards.paper.mirror.MirrorRepairListener;
+import net.civmc.shards.paper.mirror.MirrorSignPublisher;
 import net.civmc.shards.paper.mirror.MirrorStore;
 import net.civmc.shards.paper.mirror.MirrorUpdatePublisher;
 import net.civmc.shards.paper.mirror.MirrorView;
@@ -72,6 +78,7 @@ public final class ShardsPaperPlugin extends JavaPlugin {
     private ShardsServer mirrorServer;
     private MirrorView mirror;
     private BorderEntitySweep entitySweep;
+    private EntityDataLayout entityDataLayout = EntityDataLayout.UNKNOWN;
     private MirrorStore mirrorStore;
     private final ShardBorder border = new ShardBorder();
     // Read from the login thread, written from whichever thread the startup answer arrives on
@@ -247,11 +254,14 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         // Shared by the two halves that have to agree on one count: the publisher that numbers an
         // announcement, and the provider that says which number a snapshot was taken at
         final ChunkRevisions revisions = new ChunkRevisions();
+        // Before the players, who are now drawn with two numbered fields of their own
+        this.entityDataLayout = startEntityDataLayout();
         final MirrorPlayers players = startPlayerMirror();
         // As far as the client renders, which is what has to look right. The neighbour's own view
         // distance does not come into it - it is this server's players who are looking
         final MirrorView mirror = new MirrorView(this, this.border, outlook, this.client,
-            this.config.serverName(), getLogger(), getServer().getViewDistance(), metrics);
+            this.config.serverName(), getLogger(), getServer().getViewDistance(), metrics,
+            startEntityMirror());
         this.mirror = mirror;
         startMirrorStore(mirror);
         this.mirrorServer = new ShardsServer(this.config.connectionFactory(), this.config.serverName(), this,
@@ -271,6 +281,21 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             this.config.serverName(), getLogger(), revisions);
         getServer().getPluginManager().registerEvents(publisher, this);
         getServer().getScheduler().runTaskTimer(this, publisher::flush, 1L, 1L);
+
+        // The same for the frames and stands, on the same count, so a missed announcement of either is
+        // noticed the same way. Separate from the blocks because nothing about a frame is a block
+        // change and no block event ever fires for one
+        final MirrorEntityPublisher entityPublisher = new MirrorEntityPublisher(this.border, this.client,
+            this.config.serverName(), revisions);
+        getServer().getPluginManager().registerEvents(entityPublisher, this);
+        getServer().getScheduler().runTaskTimer(this, entityPublisher::flush, 1L, 1L);
+
+        // And what this shard's signs say, on the same count again. A sign is a block and arrives as
+        // one, but what is written on it is not part of the block and nothing else would carry it
+        final MirrorSignPublisher signPublisher = new MirrorSignPublisher(this, this.border, this.client,
+            this.config.serverName(), revisions);
+        getServer().getPluginManager().registerEvents(signPublisher, this);
+        getServer().getScheduler().runTaskTimer(this, signPublisher::flush, 1L, 1L);
 
         // Where this shard's players are, every tick, for the shards that can see that ground. Sent
         // whether or not this server can show anybody: a neighbour may be able to even if we cannot
@@ -307,6 +332,63 @@ public final class ShardsPaperPlugin extends JavaPlugin {
      * ordinary failure. A half-installed library throws that at the point of first use rather than at
      * load, which is how this took the border, the transfers and the sky down with it.</p>
      */
+    /**
+     * Starts reading metadata field numbers off this server's own entities.
+     *
+     * <p>The second place a field number is looked for, behind the class the server declares it on.
+     * It stays for the reason it was written: it needs nothing of the server's internals, so it is
+     * what answers on a server this was not written against.</p>
+     *
+     * <p>Behind the same guard as the rest of the packet work, for the same reason: a soft dependency
+     * that takes the plugin down when it is missing is not soft.</p>
+     */
+    private EntityDataLayout startEntityDataLayout() {
+        final Plugin packetEvents = getServer().getPluginManager().getPlugin("packetevents");
+        if (packetEvents == null || !packetEvents.isEnabled()) {
+            return EntityDataLayout.UNKNOWN;
+        }
+        try {
+            final LearnedEntityDataLayout layout = new LearnedEntityDataLayout(getLogger());
+            layout.watch();
+            // What the network threads saw, turned into what is known, where the server's entity table
+            // can be read. Once a second: nothing is waiting on it, and a field is learned the first
+            // time an entity of that kind is sent to anybody
+            getServer().getScheduler().runTaskTimer(this, layout::settle, 20L, 20L);
+            return layout;
+        } catch (final RuntimeException | LinkageError exception) {
+            getLogger().log(Level.WARNING, "PacketEvents is installed but its metadata could not be "
+                + "read, so nothing that needs a metadata field number will be drawn", exception);
+            return EntityDataLayout.UNKNOWN;
+        }
+    }
+
+    /**
+     * Starts drawing the frames and stands a neighbouring shard has.
+     *
+     * <p>Behind the packet guard like the rest of it, and behind the metadata reader as well: the item
+     * in a frame is a numbered field, and the number is read off this server's own entities rather than
+     * guessed. Without the reader a frame is still drawn - empty - which is why this does not refuse to
+     * start without it.</p>
+     */
+    private MirrorEntities startEntityMirror() {
+        final Plugin packetEvents = getServer().getPluginManager().getPlugin("packetevents");
+        if (packetEvents == null || !packetEvents.isEnabled()) {
+            getLogger().info("PacketEvents is not installed, so the frames and stands on other shards "
+                + "will not be drawn. The blocks of their builds still are");
+            return MirrorEntities.NONE;
+        }
+        try {
+            if (this.entityDataLayout instanceof LearnedEntityDataLayout learned) {
+                return new MirrorEntityView(learned);
+            }
+            return MirrorEntities.NONE;
+        } catch (final RuntimeException | LinkageError exception) {
+            getLogger().log(Level.SEVERE, "PacketEvents is installed but could not be used, so the "
+                + "frames and stands on other shards will not be drawn", exception);
+            return MirrorEntities.NONE;
+        }
+    }
+
     private MirrorPlayers startPlayerMirror() {
         final Plugin packetEvents = getServer().getPluginManager().getPlugin("packetevents");
         if (packetEvents == null || !packetEvents.isEnabled()) {
@@ -315,7 +397,8 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             return MirrorPlayers.NONE;
         }
         try {
-            final MirrorPlayerView view = new MirrorPlayerView();
+            final MirrorPlayerView view = new MirrorPlayerView(
+                this.entityDataLayout instanceof LearnedEntityDataLayout learned ? learned : null);
             getServer().getPluginManager().registerEvents(view, this);
             return view;
         } catch (final RuntimeException | LinkageError exception) {
