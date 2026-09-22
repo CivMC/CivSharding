@@ -1,0 +1,84 @@
+database:
+  user: root
+  password: root
+  host: localhost
+  port: 3306
+  database: database
+  pool-size: 5
+  connection-timeout: 10000
+  idle-timeout: 600000
+  max-lifetime: 7200000
+
+# The proxy answers its servers over RabbitMQ; they hold no database credentials of their own.
+rabbitmq:
+  user: guest
+  password: guest
+  host: localhost
+  port: 5672
+
+# A shard owns blocks on the x/z plane; every world at those coordinates belongs to it.
+# Each area is a polygon given as its corners, in order. The ring closes on its own, so
+# don't repeat the first corner. A rectangle is just its four corners; give a shard made
+# of disjoint pieces several areas.
+#
+# Every coordinate must be a multiple of 16, so that each edge falls on a chunk boundary and a
+# chunk belongs to exactly one shard. A chunk is the unit of lighting, heightmaps, entity storage,
+# ticking and the packet a chunk is sent to a client in, so a border through the middle of one means
+# two servers disagreeing about the same ground - and it leaves a chunk with two owners, which the
+# mirror cannot draw truthfully because there is no single shard to ask for it. A coordinate that is
+# not a multiple of 16 is refused at startup rather than rounded: snapping would move ownership of
+# real ground without anyone saying so.
+#
+# Edges must run along an axis, so corners alternate between moving in x and moving in z.
+# Write a border that looks diagonal as the steps it really is - blocks are axis-aligned,
+# so that is what it would be anyway, and spelling it out means the boundary is what you
+# see here rather than something the arithmetic decides.
+#
+# Corners sit on the grid lines between blocks and the upper edge is exclusive, so the
+# first area below owns blocks -10000..-1 and the second owns 0..9999. Both naming the
+# same 0 is what makes the border seamless: no gap, and no block owned by both. Two
+# shards that do overlap are a startup error. Shards don't have to touch, though - blocks
+# owned by nobody are fine, and land there sends a player to the holding server.
+#
+# The key is the server name, and that name is also the identity the server owns player data
+# under - so renaming one here abandons every lock held under its old name.
+#
+# Being listed here is also what makes a server share the network's player data. The shards named
+# below hand one inventory between them: a player leaving one has it written back, and the next one
+# they arrive on loads it. A server that is not listed - the holding server below, and anything else
+# on the proxy - is outside that entirely. Nothing is loaded for a player there, no lock is taken on
+# their behalf, and nothing they do there is written back, so it keeps its own player data the way
+# an unproxied server does. That is why a lobby cannot spend a player's inventory, and why standing
+# in one never stops a shard from loading them.
+#
+# A shard listed with no areas is refused at startup: owning ground and owning the players on it are
+# the same thing here, and a server meant to own neither belongs outside this map.
+shards:
+  main:
+    - vertices: [{x: -10000, z: -10000}, {x: 0, z: -10000}, {x: 0, z: 10000}, {x: -10000, z: 10000}]
+  zorweth:
+    - vertices: [{x: 0, z: -10000}, {x: 10000, z: -10000}, {x: 10000, z: 10000}, {x: 0, z: 10000}]
+
+# Where a player goes when no shard owns the place they were last seen, and where they land when
+# they have never played before. Not a shard: it is not listed above, so it holds no player data.
+holding-server: "pvp"
+
+# Whether this proxy answers /list for the whole network. A shard's own /list knows only the people
+# on it, so a network spread evenly across shards reads as several half-empty servers. Registering
+# the name here is what takes it off the shards - a command the proxy owns never reaches a backend -
+# so set this to false if something else on this network should answer /list instead.
+network-list: true
+
+# Whether the players on other shards appear in everybody's tab list. A shard sends only its own
+# players, so without this the list shows one shard's population rather than the network's - the same
+# fault as /list above, on the thing people have open all the time. Entries added here carry no
+# per-server display name, so a plugin that colours names on one shard does not colour them for
+# somebody looking from another.
+network-tab-list: true
+
+# A lock on a player's data is only ever released by the server holding it, so a shard that dies
+# and does not come back keeps its players unclaimable. After this many seconds of a shard not
+# answering - and only while the proxy has nobody connected to it - its locks are dropped and those
+# players keep whatever was last written back. 0 leaves them held until the shard returns.
+lock-expiry-seconds: 60
+failure-message: "Unable to place you on a shard. Please reconnect and try again."

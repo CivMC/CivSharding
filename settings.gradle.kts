@@ -54,3 +54,7 @@ include(":plugins:zorweth-velocity")
 include(":plugins:civproxy-velocity")
 include(":plugins:secureboot-paper")
 include(":plugins:kiragateway-velocity")
+
+include(":libraries:shards-api")
+include(":plugins:shards-velocity")
+include(":plugins:shards-paper")
