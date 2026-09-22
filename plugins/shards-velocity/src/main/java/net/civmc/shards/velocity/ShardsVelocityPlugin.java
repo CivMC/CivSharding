@@ -24,6 +24,12 @@ import net.civmc.shards.velocity.placement.ShardPlacementService;
 import net.civmc.shards.velocity.playerdata.InFlightTransfers;
 import net.civmc.shards.velocity.playerdata.PlayerDataService;
 import net.civmc.shards.velocity.playerdata.ShardLockExpiry;
+import net.civmc.shards.velocity.cargo.CargoService;
+import net.civmc.shards.velocity.rabbitmq.CargoFetchHandler;
+import net.civmc.shards.velocity.rabbitmq.CargoLandedHandler;
+import net.civmc.shards.velocity.rabbitmq.CargoReserveHandler;
+import net.civmc.shards.velocity.rabbitmq.CargoSendHandler;
+import net.civmc.shards.velocity.rabbitmq.CargoStatusHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerCheckpointHandler;
 import net.civmc.shards.velocity.rabbitmq.BorderProbeHandler;
 import net.civmc.shards.velocity.rabbitmq.PlayerClaimHandler;
@@ -78,6 +84,7 @@ public final class ShardsVelocityPlugin {
 
         this.shardPlacementService = shardsInjector.getInstance(ShardPlacementService.class);
         this.playerDataService = shardsInjector.getInstance(PlayerDataService.class);
+        final CargoService cargoService = shardsInjector.getInstance(CargoService.class);
 
         // One clock and one weather for the network, so a crossing does not take a player from noon
         // into a thunderstorm while the ground stays continuous
@@ -89,6 +96,113 @@ public final class ShardsVelocityPlugin {
         if (!this.requestConsumer.start()) {
             this.logger.warn("Shards could not start its request consumer; no server can reach its player data");
         }
+        startLockExpiry(shardsConfig);
+        startCargoPruning(cargoService);
+        registerNetworkList(shardsConfig);
+        startNetworkTabList(shardsConfig);
+    }
+
+    /**
+     * Forgets the rows of parcels that were landed long enough ago to be of no further interest.
+     *
+     * <p>Slow, and deliberately not a startup job: nothing depends on it having run, and a parcel
+     * still waiting is never touched by it however old it is.</p>
+     */
+    private void startCargoPruning(final CargoService cargoService) {
+        this.proxyServer.getScheduler().buildTask(this, () -> {
+            try {
+                final int pruned = cargoService.pruneLanded(CARGO_RETENTION);
+                if (pruned > 0) {
+                    this.logger.info("Forgot {} landed cargo rows", pruned);
+                }
+            } catch (final RuntimeException exception) {
+                this.logger.warn("Could not prune landed cargo", exception);
+            }
+        }).delay(CARGO_PRUNE_HOURS, TimeUnit.HOURS).repeat(CARGO_PRUNE_HOURS, TimeUnit.HOURS).schedule();
+    }
+
+    /**
+     * Shows the whole network in everybody's tab list, not just the shard they are standing on.
+     *
+     * <p>Kept up to date by events and by a slow sweep together: the events put an arrival or a
+     * departure right at once, and the sweep refreshes the pings - which would otherwise be whatever
+     * they were at the moment somebody connected - and quietly repairs anything an event missed.</p>
+     */
+    private void startNetworkTabList(final ShardsConfig shardsConfig) {
+        if (!shardsConfig.networkTabList()) {
+            return;
+        }
+        final NetworkTabList tabList = new NetworkTabList(this.proxyServer);
+        this.proxyServer.getEventManager().register(this, tabList);
+        this.proxyServer.getScheduler().buildTask(this, tabList::sync)
+            .repeat(TAB_LIST_SYNC_SECONDS, TimeUnit.SECONDS)
+            .schedule();
+    }
+
+    /**
+     * Takes {@code /list} off the shards and answers it here.
+     *
+     * <p>A shard's own list knows only the people on it, so a network spread evenly across shards
+     * reads as several half-empty servers - the opposite of what the borders are for. The proxy
+     * already knows every player and where each one is, so this needs nothing asked and nothing kept
+     * in sync.</p>
+     */
+    private void registerNetworkList(final ShardsConfig shardsConfig) {
+        if (!shardsConfig.networkList()) {
+            return;
+        }
+        final CommandManager commandManager = this.proxyServer.getCommandManager();
+        commandManager.register(commandManager.metaBuilder("list").plugin(this).build(),
+            new NetworkListCommand(this.proxyServer, dataOwningServers(shardsConfig)));
+    }
+
+    /**
+     * Watches for a shard that has died still holding its players.
+     *
+     * <p>On the proxy rather than in the shards, because the shard this is about is the one that is
+     * not running. It is also the only side that can tell "not answering" from "gone": it pings them
+     * and it knows who is connected to each.</p>
+     */
+    private void startLockExpiry(final ShardsConfig shardsConfig) {
+        if (shardsConfig.lockExpirySeconds() <= 0) {
+            this.logger.warn("Lock expiry is off: a shard that dies keeps its players unclaimable until it "
+                + "starts again");
+            return;
+        }
+        final ShardLockExpiry expiry = new ShardLockExpiry(this.proxyServer, this.playerDataService,
+            dataOwningServers(shardsConfig), TimeUnit.SECONDS.toMillis(shardsConfig.lockExpirySeconds()),
+            this.logger);
+        // Checked several times within the window rather than once at the end of it, so the moment a
+        // shard is declared dead does not depend on where its death fell in the cycle
+        final long checkSeconds = Math.max(5L, shardsConfig.lockExpirySeconds() / 4L);
+        this.proxyServer.getScheduler().buildTask(this, expiry::check)
+            .repeat(checkSeconds, TimeUnit.SECONDS)
+            .schedule();
+        this.logger.info("Dropping the locks of a shard that has not answered for {}s",
+            shardsConfig.lockExpirySeconds());
+    }
+
+    /**
+     * Every server that owns player data under a name of its own, which is exactly the shards.
+     *
+     * <p>The holding server used to be counted here as well, on the reading that it held a player
+     * while they stood on it. It does not: a server outside the shard map is refused a lock, so it
+     * can never be holding one for the expiry to drop or for an operator to trace. Listing it would
+     * be pinging a server about locks it is not allowed to take.</p>
+     *
+     * <p>Named for what it means rather than kept as a synonym for the shard names, because the two
+     * are the same set only for as long as owning ground and owning players stay the same thing.</p>
+     */
+    private static List<String> dataOwningServers(final ShardsConfig shardsConfig) {
+        return List.copyOf(new LinkedHashSet<>(shardsConfig.shards().keySet()));
+    }
+
+    @Subscribe
+    public void onProxyShutdown(final ProxyShutdownEvent event) {
+        // The database pool closes itself through the hook DatabaseModule registers when it opens it
+        if (this.requestConsumer != null) {
+            this.requestConsumer.close();
+        }
     }
 
     /**
@@ -97,6 +211,9 @@ public final class ShardsVelocityPlugin {
      * server. Writing the mapping out once at startup gives them that.
      */
     private void logServerIds(final ShardsConfig shardsConfig) {
+        for (final String serverName : dataOwningServers(shardsConfig)) {
+            this.logger.info("Server {} owns player data as {}", serverName, ShardServerId.of(serverName));
+        }
     }
 
     /**

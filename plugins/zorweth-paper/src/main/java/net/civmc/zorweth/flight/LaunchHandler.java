@@ -1,52 +1,52 @@
 package net.civmc.zorweth.flight;
 
 import com.devotedmc.ExilePearl.ExilePearlPlugin;
-import com.google.common.io.ByteArrayDataOutput;
-import com.google.common.io.ByteStreams;
 import com.sk89q.worldedit.extent.clipboard.Clipboard;
 import com.sk89q.worldedit.math.BlockVector3;
 import com.sk89q.worldedit.regions.Region;
-import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Level;
-import net.civmc.zorweth.RocketTransferKeys;
+import net.civmc.shards.api.CargoSendResponse;
+import net.civmc.shards.api.PlayerLocation;
+import net.civmc.shards.paper.cargo.CargoService;
+import net.civmc.shards.paper.cargo.ChunkFlush;
 import net.civmc.zorweth.ZorwethPlugin;
 import net.civmc.zorweth.mechanics.Fuel;
 import net.civmc.zorweth.transfer.RocketBlockPosition;
-import net.civmc.zorweth.transfer.RocketChestTransfer;
 import net.civmc.zorweth.transfer.RocketEntityPosition;
 import net.civmc.zorweth.transfer.RocketManifest;
 import net.civmc.zorweth.transfer.RocketManifestChest;
-import net.civmc.zorweth.transfer.RocketManifestFileWriter;
+import net.civmc.zorweth.transfer.RocketCargo;
 import net.civmc.zorweth.transfer.RocketManifestPassenger;
-import net.civmc.zorweth.transfer.RocketManifestSerializer;
-import net.civmc.zorweth.transfer.RocketPassengerTransfer;
+import net.civmc.zorweth.transfer.ShardTransfers;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
-import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.Chest;
 import org.bukkit.entity.Player;
-import org.bukkit.inventory.CraftingInventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.BundleMeta;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import vg.civcraft.mc.citadel.ReinforcementLogic;
 import vg.civcraft.mc.citadel.model.Reinforcement;
 
 // Handles launching logic
 public class LaunchHandler {
+
+    // A landing is put down by the destination's cargo sweep, which runs every couple of seconds,
+    // so this is a handful of polls rather than a wait. Generous because the cost of giving up early
+    // is passengers left behind, and the cost of waiting is a few more seconds of standing still
+    private static final long LANDING_POLL_TICKS = 20L;
+    private static final int LANDING_ATTEMPTS = 30;
 
     public static final double FUEL_ITEM_MASS_KG = 4.0;
     public static final double EXHAUST_VELOCITY_METERS_PER_SECOND = 5_000.0;
@@ -158,9 +158,6 @@ public class LaunchHandler {
                 itemMass = itemAmount * Fuel.CRUDE_OIL_ITEM_MASS_KG;
             }
             mass += itemMass;
-            if (item.getItemMeta() instanceof BundleMeta bundleMeta) {
-                mass += itemAmount * calculateItemMass(bundleMeta.getItems().toArray(ItemStack[]::new));
-            }
         }
         return mass;
     }
@@ -251,9 +248,9 @@ public class LaunchHandler {
                 Component.text("Destination not set.", NamedTextColor.RED));
         }
 
-        if (containsIllegalItem(payload)) {
+        if (containsExilePearl(payload)) {
             return new RocketManifestResult(null,
-                Component.text("Filled maps and pearls cannot be transferred on rockets.", NamedTextColor.RED));
+                Component.text("Pearls cannot be transferred on rockets.", NamedTextColor.RED));
         }
 
         return new RocketManifestResult(new RocketManifest(
@@ -286,35 +283,39 @@ public class LaunchHandler {
         return (int) column;
     }
 
-    private static boolean containsIllegalItem(final RocketWeightPayload payload) {
+    private static boolean containsExilePearl(final RocketWeightPayload payload) {
         for (final RocketManifestPassenger passenger : payload.passengers()) {
-            if (containsIllegalItem(passenger.inventoryContents())) {
+            if (containsExilePearl(passenger.inventoryContents())) {
                 return true;
             }
         }
         for (final RocketManifestChest chest : payload.chests()) {
-            if (containsIllegalItem(chest.contents())) {
+            if (containsExilePearl(chest.contents())) {
                 return true;
             }
         }
         return false;
     }
 
-    private static boolean containsIllegalItem(final ItemStack[] contents) {
+    private static boolean containsExilePearl(final ItemStack[] contents) {
         for (final ItemStack item : contents) {
-            if (item != null && (item.getType() == Material.FILLED_MAP
-                || (item.getType() == Material.ENDER_PEARL
-                    && Bukkit.getPluginManager().isPluginEnabled("ExilePearl")
-                    && ExilePearlPlugin.getApi() != null
-                    && ExilePearlPlugin.getApi().getPearlFromItemStack(item) != null))) {
+            if (isExilePearl(item)) {
                 return true;
             }
             if (item != null && item.getItemMeta() instanceof BundleMeta bundleMeta
-                && containsIllegalItem(bundleMeta.getItems().toArray(ItemStack[]::new))) {
+                && containsExilePearl(bundleMeta.getItems().toArray(ItemStack[]::new))) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static boolean isExilePearl(final ItemStack item) {
+        return item != null
+            && item.getType() == Material.ENDER_PEARL
+            && Bukkit.getPluginManager().isPluginEnabled("ExilePearl")
+            && ExilePearlPlugin.getApi() != null
+            && ExilePearlPlugin.getApi().getPearlFromItemStack(item) != null;
     }
 
     private static double getRemainingFuel(final List<RocketManifestChest> chests,
@@ -339,136 +340,213 @@ public class LaunchHandler {
         return reinforcement.getGroupId();
     }
 
+    /**
+     * Sends a rocket, its hold first and its passengers after it.
+     *
+     * <p>The order is the whole of what makes this safe, and it is the opposite of what it used to
+     * be. Nothing on this side is destroyed until the destination shard is answerable for the hold: a
+     * failure at any point before that leaves the rocket standing, fuelled, with everything still in
+     * it, and the launch simply does not happen. Once the hold has been handed over it is destroyed
+     * here and that destruction is written to disk, because a cleared chest that is still full on
+     * disk is a second copy waiting for the next crash.</p>
+     *
+     * <p>Passengers are not taken apart at all. They are handed over as themselves, by the same
+     * mechanism that carries anyone walking across a border, so there is no moment where a player's
+     * inventory exists in a table and nowhere else - which is what the old path did, and what made
+     * every failure after it a loss.</p>
+     */
     public static void commitLaunch(final ZorwethPlugin plugin, final Block computer, final Player clicker) {
         if (!computer.getWorld().getName().equals(plugin.getSourceWorld())) {
             clicker.sendMessage(Component.text("Rockets can only launch from the overworld.", NamedTextColor.RED));
             return;
         }
 
-        final LaunchHandler.RocketManifestResult manifestResult = LaunchHandler.collectLaunchManifest(plugin, computer, clicker, plugin.getRocketClipboard());
+        final LaunchHandler.RocketManifestResult manifestResult = LaunchHandler.collectLaunchManifest(plugin,
+            computer, clicker, plugin.getRocketClipboard());
         if (manifestResult.failure() != null) {
             clicker.sendMessage(manifestResult.failure());
             return;
         }
 
         final RocketManifest manifest = manifestResult.manifest();
-        final LaunchHandler.FuelStatus fuelStatus = LaunchHandler.calculateFuelStatus(computer, manifest.passengers(), manifest.chests());
+        final LaunchHandler.FuelStatus fuelStatus = LaunchHandler.calculateFuelStatus(computer,
+            manifest.passengers(), manifest.chests());
         if (fuelStatus.currentFuelKg() < fuelStatus.requiredFuelKg()) {
             clicker.sendMessage(Component.text("Rocket is insufficiently fuelled", NamedTextColor.RED));
             return;
         }
 
-        int uses = FlightComputer.getUsesRemaining(computer);
+        final int uses = FlightComputer.getUsesRemaining(computer);
         if (uses <= 0) {
             clicker.sendMessage(Component.text("The rocket is broken beyond repair.", NamedTextColor.RED));
             return;
         }
 
-        final RocketBlockPosition destinationOrigin = findDestinationOrigin(manifest);
-        if (destinationOrigin == null) {
-            clicker.sendMessage(Component.text("Destination world is not available for landing calculation.", NamedTextColor.RED));
+        final CargoService cargo = ShardTransfers.cargo().orElse(null);
+        if (cargo == null) {
+            clicker.sendMessage(Component.text("Rockets cannot launch right now. Please try again shortly.",
+                NamedTextColor.RED));
             return;
         }
 
-        final List<RocketPassengerTransfer> passengers;
-        final List<RocketChestTransfer> chests;
-        try {
-            passengers = RocketManifestSerializer.serializePassengers(manifest);
-            chests = RocketManifestSerializer.serializeChests(manifest);
-        } catch (final RuntimeException exception) {
-            plugin.getLogger().log(Level.SEVERE, "Failed to serialize rocket transfer payload", exception);
-            clicker.sendMessage(Component.text("Failed to prepare rocket transfer payload.", NamedTextColor.RED));
-            return;
-        }
+        final RocketCargo hold = hold(manifest, uses - 1);
+        final Block origin = FlightComputer.getRocketOrigin(computer);
 
-        final RocketManifest launchedManifest = new RocketManifest(
-            manifest.transferId(),
-            manifest.sourceServer(),
-            manifest.destinationServer(),
-            manifest.sourceWorld(),
-            manifest.destinationWorld(),
-            manifest.sourceOrigin(),
-            manifest.destinationRequestedX(),
-            manifest.destinationRequestedZ(),
-            manifest.pilotUuid(),
-            manifest.flightComputerGroupId(),
-            manifest.passengers(),
-            manifest.chests(),
-            manifest.fuelKg(),
-            uses - 1
-        );
-        clearPassengerState(manifest);
-        setSourceClearedMarkers(launchedManifest);
-        clearRocket(plugin.getRocketClipboard(), computer);
-
-        for (RocketPassengerTransfer passenger : passengers) {
+        // Held still, and nothing else done to them. They keep everything they have for as long as
+        // this takes, and get it all back by simply being let go if the launch does not happen
+        for (final RocketManifestPassenger passenger : manifest.passengers()) {
             plugin.getStasisHandler().putInStasis(Bukkit.getPlayer(passenger.playerUuid()));
         }
-
+        // What is in the hold has now been read, and is about to exist at the destination as well.
+        // Anything taken out of a chest between here and the handover settling would be taken out of
+        // a copy that has already gone, so for that moment nothing may reach the rocket at all
+        plugin.getLaunchGuard().arm(manifest.transferId(), box(plugin, origin));
         clicker.sendMessage(Component.text("Preparing rocket transfer.", NamedTextColor.GREEN));
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            for (int i = 0; i < 5; i++) {
-                if (i > 0) {
-                    try {
-                        Thread.sleep((1 << (i - 1)) * 1000L);
-                        plugin.getLogger().log(Level.WARNING, "Retrying transfer #" + i + "...");
-                    } catch (final InterruptedException exception) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
-                }
-                try {
-                    plugin.getRocketTransferDao().insertPreparedTransfer(launchedManifest, passengers, chests);
-                    break;
-                } catch (final Exception exception) {
-                    plugin.getLogger().log(Level.SEVERE, "Failed to insert prepared rocket transfer", exception);
-                }
-                if (i == 4) {
-                    clicker.sendMessage(Component.text("Rocket launch failed, please contact admins.", NamedTextColor.RED));
 
-                    Bukkit.getScheduler().runTask(plugin, () -> {
-                        for (RocketPassengerTransfer passenger : passengers) {
-                            Player player = Bukkit.getPlayer(passenger.playerUuid());
-                            if (player != null) {
-                                plugin.getStasisHandler().removeStasis(player);
-                                clearSourceMarkers(player);
-                            } else {
-                                plugin.getLogger().log(Level.SEVERE, "Unable to clear launch markers from " + passenger.playerUuid());
-                            }
-                        }
-                    });
+        // Addressed to where the pilot aimed. Which shard that is is the proxy's to work out, and the
+        // exact spot is the landing shard's - this side names a place, not a server
+        cargo.send(manifest.transferId(), RocketCargo.TYPE, hold.toBytes(),
+                new PlayerLocation(manifest.destinationWorld(), manifest.destinationRequestedX(), 0.0,
+                    manifest.destinationRequestedZ()))
+            .whenComplete((response, error) -> Bukkit.getScheduler().runTask(plugin,
+                () -> onHoldSent(plugin, manifest, origin, clicker, response, error)));
+    }
 
-                    try {
-                        plugin.getLogger().log(Level.SEVERE, "Failed to retry launch, writing file..");
-                        File write = RocketManifestFileWriter.write(plugin, launchedManifest);
-                        plugin.getLogger().log(Level.SEVERE, "Written launch failure to " + write.getName());
-                    } catch (final IOException exception) {
-                        throw new RuntimeException(exception);
-                    }
+    private static void onHoldSent(final ZorwethPlugin plugin, final RocketManifest manifest,
+                                   final Block origin, final Player clicker,
+                                   final CargoSendResponse response, final Throwable error) {
+        if (error != null || !CargoService.sent(response)) {
+            // Nothing has been touched. The rocket is still standing with everything in it and the
+            // passengers still have everything they had, so there is nothing to put back
+            plugin.getLogger().log(Level.SEVERE, "Could not hand over a rocket's hold for transfer "
+                + manifest.transferId() + (error == null
+                    ? ": " + response.status() + " " + response.failureMessage() : ""), error);
+            plugin.getLaunchGuard().disarm(manifest.transferId());
+            releasePassengers(plugin, manifest);
+            clicker.sendMessage(Component.text("Rocket launch failed. Nothing has been moved - please try "
+                + "again shortly.", NamedTextColor.RED));
+            return;
+        }
+
+        // The hold belongs to the other shard from here on, so this copy of it must go - and go
+        // durably. Leaving it is duplicating it
+        clearRocket(plugin.getRocketClipboard(), origin);
+        flushCleared(plugin, origin);
+        // There is nothing left to guard: the rocket is air and its chests are somebody else's
+        plugin.getLaunchGuard().disarm(manifest.transferId());
+
+        clicker.sendMessage(Component.text("Ignition.", NamedTextColor.GREEN));
+        awaitLanding(plugin, manifest, clicker, 0);
+    }
+
+    /**
+     * Waits for the landing shard to say where the rocket ended up, then sends the passengers there.
+     *
+     * <p>Asked for rather than pushed, and worth being plain about what running out of patience here
+     * means: the hold has landed or will land regardless - it is owned by the other shard and its
+     * sweep will put it down - and the passengers keep everything they are carrying. What they lose
+     * is the ride.</p>
+     */
+    private static void awaitLanding(final ZorwethPlugin plugin, final RocketManifest manifest,
+                                     final Player clicker, final int attempt) {
+        if (attempt >= LANDING_ATTEMPTS) {
+            plugin.getLogger().severe("Rocket " + manifest.transferId() + " was handed over but its landing "
+                + "was not reported within " + (LANDING_ATTEMPTS * LANDING_POLL_TICKS / 20L) + "s. Its hold "
+                + "is safe with " + manifest.destinationServer() + " and will be landed there; its "
+                + "passengers stay here with everything they were carrying");
+            releasePassengers(plugin, manifest);
+            clicker.sendMessage(Component.text("The rocket launched without you. Nothing you were carrying "
+                + "was lost - please contact an admin about the rocket itself.", NamedTextColor.RED));
+            return;
+        }
+
+        final CargoService cargo = ShardTransfers.cargo().orElse(null);
+        if (cargo == null) {
+            releasePassengers(plugin, manifest);
+            return;
+        }
+        cargo.whereItLanded(manifest.transferId())
+            .whenComplete((landedAt, error) -> Bukkit.getScheduler().runTask(plugin, () -> {
+                if (error == null && landedAt != null) {
+                    boardPassengers(plugin, manifest, landedAt);
                     return;
                 }
+                Bukkit.getScheduler().runTaskLater(plugin,
+                    () -> awaitLanding(plugin, manifest, clicker, attempt + 1), LANDING_POLL_TICKS);
+            }));
+    }
+
+    /**
+     * Sends each passenger to their own seat in the rocket, wherever it came down.
+     */
+    private static void boardPassengers(final ZorwethPlugin plugin, final RocketManifest manifest,
+                                        final PlayerLocation landedAt) {
+        for (final RocketManifestPassenger passenger : manifest.passengers()) {
+            final Player player = Bukkit.getPlayer(passenger.playerUuid());
+            if (player == null) {
+                // They disconnected while the rocket was on its way. Nothing was taken off them, so
+                // they are wherever they last were with everything they had
+                continue;
             }
-
-            Bukkit.getScheduler().runTask(plugin, () -> {
-                LaunchHandler.connectOrKickPassengers(plugin, launchedManifest);
-                clicker.sendMessage(Component.text("Ignition.", NamedTextColor.GREEN));
-            });
-        });
-    }
-
-    private static RocketBlockPosition findDestinationOrigin(final RocketManifest manifest) {
-        final World destinationWorld = Bukkit.getWorld(manifest.destinationWorld());
-        if (destinationWorld == null) {
-            return null;
+            plugin.getStasisHandler().removeStasis(player);
+            final RocketEntityPosition seat = passenger.relativePosition();
+            if (!ShardTransfers.toLocation(player, landedAt.world(),
+                landedAt.x() + seat.x(),
+                // Above the seat, as the old arrival did - the seat itself is inside a block
+                landedAt.y() + seat.y() + 1.2,
+                landedAt.z() + seat.z())) {
+                plugin.getLogger().severe("Could not send " + passenger.playerUuid() + " to the rocket that "
+                    + "landed at " + landedAt + "; they keep everything they are carrying");
+                player.sendMessage(Component.text("The rocket landed without you. Nothing you were carrying "
+                    + "was lost.", NamedTextColor.RED));
+            }
         }
-        final int y = destinationWorld.getHighestBlockYAt(manifest.destinationRequestedX(), manifest.destinationRequestedZ());
-        return new RocketBlockPosition(manifest.destinationRequestedX(), y, manifest.destinationRequestedZ());
     }
 
-    private static void clearRocket(Clipboard clipboard, Block computer) {
+    private static void releasePassengers(final ZorwethPlugin plugin, final RocketManifest manifest) {
+        for (final RocketManifestPassenger passenger : manifest.passengers()) {
+            final Player player = Bukkit.getPlayer(passenger.playerUuid());
+            if (player != null) {
+                plugin.getStasisHandler().removeStasis(player);
+            }
+        }
+    }
+
+    /**
+     * Writes the now-empty rocket pad to disk.
+     *
+     * <p>Not optional. Until this happens the chests are cleared only in memory, and what is on disk
+     * is the rocket as it was, full - so a server killed between the handover and the next autosave
+     * comes back with a second copy of everything that just left.</p>
+     */
+    private static void flushCleared(final ZorwethPlugin plugin, final Block origin) {
+        final Region region = plugin.getRocketClipboard().getRegion();
+        ChunkFlush.blocks(origin.getWorld(), origin.getX(), origin.getZ(),
+            origin.getX() + region.getWidth(), origin.getZ() + region.getLength(), plugin.getLogger());
+    }
+
+    private static LaunchGuard.Box box(final ZorwethPlugin plugin, final Block origin) {
+        final Region region = plugin.getRocketClipboard().getRegion();
+        return new LaunchGuard.Box(origin.getWorld().getName(),
+            origin.getX(), origin.getY(), origin.getZ(),
+            origin.getX() + region.getWidth() - 1,
+            origin.getY() + region.getHeight() - 1,
+            origin.getZ() + region.getLength() - 1);
+    }
+
+    private static RocketCargo hold(final RocketManifest manifest, final int usesRemaining) {
+        final List<RocketCargo.Chest> chests = new ArrayList<>();
+        for (final RocketManifestChest chest : manifest.chests()) {
+            chests.add(RocketCargo.Chest.of(chest.relativePosition(), chest.contents()));
+        }
+        return new RocketCargo(manifest.destinationWorld(), manifest.destinationRequestedX(),
+            manifest.destinationRequestedZ(), manifest.pilotUuid(), manifest.flightComputerGroupId(),
+            manifest.fuelKg(), usesRemaining, chests);
+    }
+
+    private static void clearRocket(final Clipboard clipboard, final Block origin) {
         final Region region = clipboard.getRegion();
         final BlockVector3 schematicNorthWestCorner = region.getMinimumPoint();
-        final Block origin = FlightComputer.getRocketOrigin(computer);
 
         for (final BlockVector3 position : region) {
             final BlockVector3 relative = position.subtract(schematicNorthWestCorner);
@@ -480,67 +558,6 @@ public class LaunchHandler {
             actualBlock.setType(Material.AIR, false);
         }
     }
-
-    private static void clearPassengerState(final RocketManifest manifest) {
-        for (final RocketManifestPassenger passenger : manifest.passengers()) {
-            final Player player = Bukkit.getPlayer(passenger.playerUuid());
-            if (player == null) {
-                continue;
-            }
-            player.getInventory().clear();
-            if (player.getOpenInventory().getTopInventory() instanceof CraftingInventory inventory) {
-                inventory.clear();
-            }
-            player.setLevel(0);
-            player.setExp(0.0f);
-            player.setFoodLevel(20);
-            player.setSaturation(5.0f);
-            player.setExhaustion(0.0f);
-            player.getInventory().setHeldItemSlot(0);
-        }
-    }
-
-    private static void setSourceClearedMarkers(final RocketManifest manifest) {
-        for (final RocketManifestPassenger passenger : manifest.passengers()) {
-            final Player player = Bukkit.getPlayer(passenger.playerUuid());
-            if (player == null) {
-                throw new IllegalStateException("unknown player" + passenger.playerUuid());
-            }
-            player.getPersistentDataContainer().set(RocketTransferKeys.SOURCE_TRANSFER_ID, PersistentDataType.STRING,
-                manifest.transferId().toString());
-            player.getPersistentDataContainer().set(RocketTransferKeys.PIONEER, PersistentDataType.BOOLEAN, true);
-        }
-    }
-
-    private static void clearSourceMarkers(Player player) {
-        player.getPersistentDataContainer().remove(RocketTransferKeys.SOURCE_TRANSFER_ID);
-    }
-
-    public static void connectOrKickPassengers(final ZorwethPlugin plugin, final RocketManifest manifest) {
-        for (final RocketManifestPassenger passenger : manifest.passengers()) {
-            final Player player = Bukkit.getPlayer(passenger.playerUuid());
-            if (player == null) {
-                continue;
-            }
-            connect(plugin, player, manifest.destinationServer());
-            Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                final Player laterPlayer = Bukkit.getPlayer(passenger.playerUuid());
-                if (laterPlayer != null
-                    && manifest.transferId().toString().equals(laterPlayer.getPersistentDataContainer()
-                    .get(RocketTransferKeys.SOURCE_TRANSFER_ID, PersistentDataType.STRING))) {
-                    laterPlayer.kick(Component.text(plugin.getTransferFailureMessage(), NamedTextColor.RED));
-                }
-            }, 150L);
-        }
-    }
-
-    private static void connect(final JavaPlugin plugin, final Player player, final String server) {
-        final ByteArrayDataOutput output = ByteStreams.newDataOutput();
-        output.writeUTF("Connect");
-        output.writeUTF(server);
-        player.sendPluginMessage(plugin, "BungeeCord", output.toByteArray());
-    }
-
 
     public record FuelStatus(int fuelItems, double currentFuelKg, double requiredFuelKg, int requiredFuelItems,
                              double cargoMassKg, int sittingPlayers) {

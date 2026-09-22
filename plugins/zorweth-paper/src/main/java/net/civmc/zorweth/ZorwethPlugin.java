@@ -16,6 +16,7 @@ import net.civmc.shards.paper.ShardsPaperPlugin;
 import net.civmc.zorweth.database.RocketTransferDao;
 import net.civmc.zorweth.database.ZorwethDatabase;
 import net.civmc.zorweth.flight.FlightComputerGui;
+import net.civmc.zorweth.flight.LaunchGuard;
 import net.civmc.zorweth.mechanics.Fuel;
 import net.civmc.zorweth.mechanics.OilMechanics;
 import net.civmc.zorweth.oxygen.ActivityManager;
@@ -31,6 +32,8 @@ import net.civmc.zorweth.research.ResearchCommand;
 import net.civmc.zorweth.research.ResearchCurrency;
 import net.civmc.zorweth.research.ResearchDisplay;
 import net.civmc.zorweth.research.ResearchManager;
+import net.civmc.zorweth.transfer.RocketCargo;
+import net.civmc.zorweth.transfer.RocketCargoLander;
 import net.civmc.zorweth.transfer.ShardTransfers;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -48,6 +51,7 @@ public final class ZorwethPlugin extends JavaPlugin {
     private StasisHandler stasisHandler;
     private RocketTransferDao rocketTransferDao;
     private CrossServerOttManager crossServerOttManager;
+    private final LaunchGuard launchGuard = new LaunchGuard();
     private ResearchManager researchManager;
     private String serverName;
     private String destinationServer;
@@ -103,6 +107,8 @@ public final class ZorwethPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new ArmourRepairKitListener(this), this);
         getServer().getPluginManager().registerEvents(new PhantomMembraneLoreListener(), this);
         getServer().getPluginManager().registerEvents(new DestinationTransferListener(this), this);
+        getServer().getPluginManager().registerEvents(this.launchGuard, this);
+        registerRocketLanding();
         getServer().getPluginManager().registerEvents(new CrossServerOttArrivalListener(this, this.crossServerOttManager), this);
         getCommand("pioneer").setExecutor(new PioneerCommand(this));
         final ResearchCommand researchCommand = new ResearchCommand(this, new ResearchCurrency(this),
@@ -308,9 +314,33 @@ public final class ZorwethPlugin extends JavaPlugin {
         return stasisHandler;
     }
 
+    /**
+     * What keeps a rocket out of reach while its hold is being handed over.
+     */
+    public LaunchGuard getLaunchGuard() {
+        return this.launchGuard;
+    }
 
     public CrossServerOttManager getCrossServerOttManager() {
         return this.crossServerOttManager;
     }
 
+    /**
+     * Says that rockets landing on this shard are landed by this plugin.
+     *
+     * <p>Registered on every server that runs it, not only the ones that launch: a rocket is put down
+     * by whoever owns the ground it was aimed at, and a shard without this would be handed cargo it
+     * had no way to land. It would keep it rather than lose it - the parcel stays owned and is offered
+     * again - but it would keep it forever.</p>
+     */
+    private void registerRocketLanding() {
+        final var shards = ShardTransfers.cargo();
+        if (shards.isEmpty()) {
+            getLogger().severe("Shards is not ready, so rockets cannot be launched or landed here");
+            return;
+        }
+        shards.get().register(RocketCargo.TYPE,
+            new RocketCargoLander(this, ((ShardsPaperPlugin) getServer().getPluginManager()
+                .getPlugin("Shards")).getShardBorder()));
+    }
 }
