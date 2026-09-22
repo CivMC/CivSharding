@@ -1,12 +1,14 @@
 package net.civmc.shards.paper;
 
 import java.util.Optional;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import net.civmc.shards.api.ServerStartupRequest;
 import net.civmc.shards.api.ServerStartupResponse;
 import net.civmc.shards.paper.border.ArrivalCue;
 import net.civmc.shards.paper.border.BorderNotices;
+import net.civmc.shards.paper.border.BorderEntitySweep;
 import net.civmc.shards.paper.border.BorderOutlook;
 import net.civmc.shards.paper.border.BorderRenderer;
 import net.civmc.shards.paper.border.BorderView;
@@ -24,6 +26,7 @@ import net.civmc.shards.paper.mirror.MirrorPlayerPublisher;
 import net.civmc.shards.paper.mirror.MirrorPlayerView;
 import net.civmc.shards.paper.mirror.MirrorPlayers;
 import net.civmc.shards.paper.mirror.MirrorRepairListener;
+import net.civmc.shards.paper.mirror.MirrorStore;
 import net.civmc.shards.paper.mirror.MirrorUpdatePublisher;
 import net.civmc.shards.paper.mirror.MirrorView;
 import net.civmc.shards.paper.mirror.UnownedEntityView;
@@ -54,6 +57,10 @@ public final class ShardsPaperPlugin extends JavaPlugin {
     // after walking towards a border the far side fills in, not about how often work is done
     private static final long MIRROR_TICKS = 20L;
     private static final long MIRROR_REPORT_TICKS = 20L * 30L;
+    // Long, because what is written is only a head start: everything saved is read again from its owner
+    // the first time anybody looks at it, so a save that is an hour out of date costs nothing
+    private static final long MIRROR_SAVE_TICKS = 20L * 60L * 5L;
+    private static final long MIRROR_FORGET_TICKS = 20L * 60L * 5L;
     private static final long STARTUP_RETRY_MIN_TICKS = 20L * 5L;
     private static final long STARTUP_RETRY_MAX_TICKS = 20L * 60L;
 
@@ -63,6 +70,9 @@ public final class ShardsPaperPlugin extends JavaPlugin {
     private OwnedPlayers owned;
     private TransferService transfers;
     private ShardsServer mirrorServer;
+    private MirrorView mirror;
+    private BorderEntitySweep entitySweep;
+    private MirrorStore mirrorStore;
     private final ShardBorder border = new ShardBorder();
     // Read from the login thread, written from whichever thread the startup answer arrives on
     private volatile boolean startupComplete;
@@ -104,6 +114,7 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         getCommand("shardsnapshot").setExecutor(new SnapshotVerifyCommand());
         startSkySync();
         startUnownedEntityView();
+        startEntitySweep();
         startMirror(outlook);
         startPeriodicSave();
         startBorderView(this.view);
@@ -127,6 +138,12 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         }
         if (this.mirrorServer != null) {
             this.mirrorServer.close();
+        }
+        // After the mirror has stopped being updated and while the server is still whole. Written here
+        // rather than only on the timer so an ordinary stop does not throw away everything since the
+        // last one
+        if (this.mirrorStore != null && this.mirror != null) {
+            this.mirrorStore.save(this.mirror.toSave());
         }
         if (this.client != null) {
             this.client.close();
@@ -170,6 +187,47 @@ public final class ShardsPaperPlugin extends JavaPlugin {
     }
 
     /**
+     * Keeps what the neighbours have said across a restart, and puts it back.
+     *
+     * <p>Nothing loaded is trusted: every restored chunk is marked to be read from its owner again the
+     * first time anybody looks at it. What it buys is a border that is drawn immediately rather than
+     * filling in, and - the reason it is worth having - a neighbour that is down showing the last
+     * thing it said instead of this server's own empty copy of its land.</p>
+     */
+    private void startMirrorStore(final MirrorView mirror) {
+        if (!this.config.saveMirror()) {
+            getLogger().warning("Not saving the mirror: a restart will read every chunk along every "
+                + "border again, and while a neighbour is down its ground will show as this server's "
+                + "own untouched copy of it");
+            return;
+        }
+        this.mirrorStore = new MirrorStore(getDataFolder().toPath().resolve("mirror.json.gz"), getLogger());
+        mirror.restore(this.mirrorStore.load());
+        final MirrorStore store = this.mirrorStore;
+        // The copy is taken on the main thread and the writing is not. Serialising tens of thousands of
+        // blocks is not something to do between ticks for a picture that is only a head start anyway
+        getServer().getScheduler().runTaskTimer(this, () -> {
+            final List<MirrorStore.Saved> chunks = mirror.toSave();
+            getServer().getScheduler().runTaskAsynchronously(this, () -> store.save(chunks));
+        }, MIRROR_SAVE_TICKS, MIRROR_SAVE_TICKS);
+    }
+
+    /**
+     * Stops the entities that drift over a border and have no move event to refuse.
+     *
+     * <p>Mobs and vehicles are answered by their own move events, exactly and for nothing. A dropped
+     * item, an arrow, primed TNT, a falling block and an experience orb have no such event, so the
+     * only way to catch one crossing is to look - every tick, at the border chunks that are
+     * loaded.</p>
+     */
+    private void startEntitySweep() {
+        final BorderEntitySweep sweep = new BorderEntitySweep(this.border, getLogger());
+        this.entitySweep = sweep;
+        getServer().getPluginManager().registerEvents(sweep, this);
+        getServer().getScheduler().runTaskTimer(this, () -> sweep.sweep(getServer().getWorlds()), 1L, 1L);
+    }
+
+    /**
      * Shows what the neighbouring shards really have on the ground past the border.
      *
      * <p>Every shard's world begins as a copy of the same map, so unmodified ground already matches -
@@ -194,6 +252,8 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         // distance does not come into it - it is this server's players who are looking
         final MirrorView mirror = new MirrorView(this, this.border, outlook, this.client,
             this.config.serverName(), getLogger(), getServer().getViewDistance(), metrics);
+        this.mirror = mirror;
+        startMirrorStore(mirror);
         this.mirrorServer = new ShardsServer(this.config.connectionFactory(), this.config.serverName(), this,
             getLogger(), new ChunkStateProvider(this.border, revisions), metrics,
             // Announcements arrive on a broker thread and these read the world and send to players
@@ -223,6 +283,10 @@ public final class ShardsPaperPlugin extends JavaPlugin {
                 mirror.update(player);
             }
         }, MIRROR_TICKS, MIRROR_TICKS);
+        // Nothing else ever removes a chunk from the mirror, so without this there is one entry for
+        // every chunk of border anybody has ever stood at, for as long as the server runs
+        getServer().getScheduler().runTaskTimer(this, mirror::forgetWhatNobodyIsLookingAt,
+            MIRROR_FORGET_TICKS, MIRROR_FORGET_TICKS);
         // What the mirror costs is not visible from anywhere else, and the two numbers it reports -
         // how long a chunk takes to read, and how many blocks really differ - are what decide whether
         // this survives a busy border
@@ -367,6 +431,14 @@ public final class ShardsPaperPlugin extends JavaPlugin {
             getLogger().info("This server owns no shard areas, so no border is enforced");
         } else {
             getLogger().info("Enforcing " + response.regions().size() + " shard area(s)");
+        }
+        // Only now is there a border to measure a chunk against, so every chunk loaded up to this
+        // point had a load event that could say nothing about it - the spawn chunks among them. On the
+        // main thread because that is the only place a world's loaded chunks can be asked for, and
+        // this answer arrives on a broker thread
+        if (this.entitySweep != null) {
+            getServer().getScheduler().runTask(this,
+                () -> this.entitySweep.watchWhatIsAlreadyLoaded(getServer().getWorlds()));
         }
     }
 
