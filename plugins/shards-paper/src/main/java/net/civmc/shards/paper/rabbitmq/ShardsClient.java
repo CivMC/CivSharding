@@ -26,6 +26,14 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import net.civmc.shards.api.PlayerCheckpointRequest;
+import net.civmc.shards.api.PlayerCheckpointResponse;
+import net.civmc.shards.api.PlayerClaimRequest;
+import net.civmc.shards.api.PlayerClaimResponse;
+import net.civmc.shards.api.PlayerReleaseRequest;
+import net.civmc.shards.api.PlayerReleaseResponse;
+import net.civmc.shards.api.PlayerSaveRequest;
+import net.civmc.shards.api.PlayerSaveResponse;
 import net.civmc.shards.api.ServerStartupRequest;
 import net.civmc.shards.api.ServerStartupResponse;
 import net.civmc.shards.api.ShardsRabbitMqTopology;
@@ -166,6 +174,20 @@ public final class ShardsClient implements AutoCloseable {
             ServerStartupResponse.class);
     }
 
+    public CompletableFuture<PlayerClaimResponse> claim(final PlayerClaimRequest request) {
+        return publish(ShardsRabbitMqTopology.PLAYER_CLAIM_QUEUE, request.requestId(), request,
+            PlayerClaimResponse.class);
+    }
+
+    public CompletableFuture<PlayerSaveResponse> save(final PlayerSaveRequest request) {
+        return publish(ShardsRabbitMqTopology.PLAYER_SAVE_QUEUE, request.requestId(), request,
+            PlayerSaveResponse.class);
+    }
+
+    public CompletableFuture<PlayerCheckpointResponse> checkpoint(final PlayerCheckpointRequest request) {
+        return publish(ShardsRabbitMqTopology.PLAYER_CHECKPOINT_QUEUE, request.requestId(), request,
+            PlayerCheckpointResponse.class);
+    }
 
 
 
@@ -178,10 +200,10 @@ public final class ShardsClient implements AutoCloseable {
 
 
 
-
-
-
-
+    public CompletableFuture<PlayerReleaseResponse> release(final PlayerReleaseRequest request) {
+        return publish(ShardsRabbitMqTopology.PLAYER_RELEASE_QUEUE, request.requestId(), request,
+            PlayerReleaseResponse.class);
+    }
 
 
 
