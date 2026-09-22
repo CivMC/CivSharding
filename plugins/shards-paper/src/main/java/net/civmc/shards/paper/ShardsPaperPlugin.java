@@ -12,6 +12,9 @@ import net.civmc.shards.paper.border.BorderNotices;
 import net.civmc.shards.paper.border.BorderOutlook;
 import net.civmc.shards.paper.border.BorderRenderer;
 import net.civmc.shards.paper.border.BorderView;
+import net.civmc.shards.paper.border.GlassBorderRenderer;
+import net.civmc.shards.paper.border.MarkerBorderRenderer;
+import net.civmc.shards.paper.border.ParticleBorderRenderer;
 import net.civmc.shards.paper.border.ShardBorder;
 import net.civmc.shards.paper.border.ShardBorderListener;
 import net.civmc.shards.paper.border.ShardRespawnListener;
@@ -74,6 +77,7 @@ public final class ShardsPaperPlugin extends JavaPlugin {
 
         final BorderNotices notices = new BorderNotices();
         final BorderOutlook outlook = new BorderOutlook(this.client, this.config.serverName(), getLogger());
+        this.view = new BorderView(this.border, outlook, notices, renderer());
         this.transfers = new TransferService(this, this.client, this.owned, getLogger(),
             this.config.serverName(), this.config.failureMessage(), notices, this.view);
 
@@ -113,6 +117,16 @@ public final class ShardsPaperPlugin extends JavaPlugin {
         }
     }
 
+    /**
+     * Whichever way this server has been told to draw its border.
+     */
+    private BorderRenderer renderer() {
+        return switch (this.config.borderStyle()) {
+            case PARTICLES -> new ParticleBorderRenderer();
+            case GLASS -> new GlassBorderRenderer(this);
+            case MARKERS -> new MarkerBorderRenderer(this);
+        };
+    }
 
     /**
      * Stops this server showing, and stops it creating, entities on ground it does not own.
